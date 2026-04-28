@@ -35,3 +35,9 @@ home-ai/
 - **M2** — passive subgraph injection on every turn (FTS + 1-hop)
 - **M3** — embeddings, hybrid retrieval, provenance + confidence
 - **M4** — graph viz panel, slash commands, export, backups
+
+## License
+
+[MIT](./LICENSE) — clone, fork, modify, use however you like; just keep the copyright notice.
+
+This is a personal project. External contributions (PRs, issues) won't be reviewed — if you want to take it in your own direction, fork it.

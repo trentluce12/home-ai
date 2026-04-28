@@ -12,6 +12,10 @@ A personal AI: streaming chat UI on top of the Anthropic API. Knowledge graph co
 
 Newest first. Append entries; don't edit history.
 
+### 2026-04-28 · MIT license + personal-project posture
+
+Picked MIT for its simplicity and permissiveness — anyone can clone, fork, modify, redistribute (even commercially), provided they keep the copyright notice. Repo is private; license is in place for whenever it goes public or gets shared. README notes that external contributions won't be reviewed — this is a personal project, not a community one.
+
 ### 2026-04-28 · Lock in Claude Agent SDK for M1+
 
 Picking `@anthropic-ai/claude-agent-sdk` over staying on the lower-level `@anthropic-ai/sdk` with its tool runner for M1+. M0 stays on the Anthropic SDK (already shipped).
