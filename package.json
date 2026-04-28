@@ -1,0 +1,20 @@
+{
+  "name": "home-ai",
+  "private": true,
+  "version": "0.0.1",
+  "description": "A personal home AI — chat UI + Anthropic SDK backend. Knowledge graph context comes in M1.",
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "dev": "concurrently --names server,web --prefix-colors yellow,cyan --kill-others-on-fail \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "npm --workspace server run dev",
+    "dev:web": "npm --workspace web run dev",
+    "build": "npm --workspace server run build && npm --workspace web run build",
+    "typecheck": "npm --workspace server run typecheck && npm --workspace web run typecheck"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
