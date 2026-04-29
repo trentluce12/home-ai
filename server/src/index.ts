@@ -14,6 +14,9 @@ import {
 import { kgServer, KG_TOOL_NAMES } from "./kg/tools.js";
 import { retrieveSubgraph } from "./kg/retrieve.js";
 import * as kg from "./kg/db.js";
+import { sqliteSessionStore } from "./sessions/store.js";
+import { cleanupSessions } from "./sessions/cleanup.js";
+import { db } from "./kg/db.js";
 
 // Load .env from the project root (one level above server/)
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -87,6 +90,7 @@ app.post("/chat", async (c) => {
         options: {
           model: "claude-opus-4-7",
           cwd: PROJECT_DIR,
+          sessionStore: sqliteSessionStore,
           systemPrompt: SYSTEM_PROMPT,
           permissionMode: "bypassPermissions",
           mcpServers: { kg: kgServer },
@@ -218,13 +222,27 @@ function extractText(message: unknown): string {
 }
 
 app.get("/sessions", async (c) => {
-  const sessions = await listSessions({ dir: PROJECT_DIR, includeWorktrees: false });
+  const includeArchived = c.req.query("includeArchived") === "true";
+  const sessions = await listSessions({
+    dir: PROJECT_DIR,
+    sessionStore: sqliteSessionStore,
+    includeWorktrees: false,
+  });
+
+  const archivedRows = db
+    .prepare(`SELECT session_id FROM sessions WHERE archived_at IS NOT NULL`)
+    .all() as { session_id: string }[];
+  const archivedSet = new Set(archivedRows.map((r) => r.session_id));
+
   return c.json(
     sessions
+      .filter((s) => includeArchived || !archivedSet.has(s.sessionId))
       .map((s) => ({
         id: s.sessionId,
-        title: s.customTitle ?? (s.firstPrompt ? stripContext(s.firstPrompt) : s.summary),
+        title:
+          s.customTitle ?? (s.firstPrompt ? stripContext(s.firstPrompt) : s.summary),
         lastModified: s.lastModified,
+        archived: archivedSet.has(s.sessionId),
       }))
       .sort((a, b) => b.lastModified - a.lastModified),
   );
@@ -232,7 +250,10 @@ app.get("/sessions", async (c) => {
 
 app.get("/sessions/:id/history", async (c) => {
   const id = c.req.param("id");
-  const messages = await getSessionMessages(id, { dir: PROJECT_DIR });
+  const messages = await getSessionMessages(id, {
+    dir: PROJECT_DIR,
+    sessionStore: sqliteSessionStore,
+  });
   const turns: { role: "user" | "assistant"; content: string }[] = [];
   for (const msg of messages) {
     if (msg.type !== "user" && msg.type !== "assistant") continue;
@@ -248,7 +269,7 @@ app.get("/sessions/:id/history", async (c) => {
 
 app.delete("/sessions/:id", async (c) => {
   const id = c.req.param("id");
-  await deleteSession(id, { dir: PROJECT_DIR });
+  await deleteSession(id, { dir: PROJECT_DIR, sessionStore: sqliteSessionStore });
   return c.json({ ok: true });
 });
 
@@ -296,5 +317,11 @@ app.get("/", (c) => c.text("home-ai server"));
 
 const port = Number(process.env.PORT) || 3001;
 serve({ fetch: app.fetch, port }, (info) => {
+  const cleanup = cleanupSessions();
+  if (cleanup.archived > 0 || cleanup.deleted > 0) {
+    console.log(
+      `[sessions] retention sweep: archived ${cleanup.archived} (>${cleanup.archiveDays}d), deleted ${cleanup.deleted} (>${cleanup.deleteDays}d)`,
+    );
+  }
   console.log(`home-ai server running on http://localhost:${info.port}`);
 });

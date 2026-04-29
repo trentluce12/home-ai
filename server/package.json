@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "node --watch --import tsx src/index.ts",
     "seed": "node --import tsx src/seed.ts",
+    "migrate-sessions": "node --import tsx src/sessions/migrate.ts",
     "build": "tsc",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit"

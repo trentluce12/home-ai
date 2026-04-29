@@ -12,6 +12,26 @@ A personal AI: streaming chat UI on top of the Anthropic API. Knowledge graph co
 
 Newest first. Append entries; don't edit history.
 
+### 2026-04-28 · M4 phase 1.5 — sessions move into SQLite via SessionStore adapter
+
+The cwd-encoding incident (sessions saved under `C--Projects-home-ai-server` because npm workspaces start the server with `cwd = server/` and `listSessions({dir})` derives a different project key) made the filesystem-backed storage feel fragile. Pivoted to the SDK's `SessionStore` adapter interface: app owns the storage, SDK uses our adapter for read/resume/list/delete.
+
+**Architecture.** The SDK does dual-write — `query({ sessionStore })` still writes to `~/.claude/projects/...` AND emits entries to our adapter. The filesystem becomes a redundant local copy; our SQLite is the source of truth for everything the app reads. `listSessions / getSessionMessages / deleteSession` all accept `sessionStore` and bypass the filesystem on the read path.
+
+**Schema (in `kg/db.ts`):**
+- `sessions(project_key, session_id, created_at, last_active, archived_at, summary_json)` — composite PK on `(project_key, session_id)`. `summary_json` is a sidecar maintained by the SDK's `foldSessionSummary` helper; we store it verbatim.
+- `session_entries(id PK AUTOINCREMENT, project_key, session_id, subpath, uuid, type, timestamp, payload_json)` — opaque JSON pass-through. `id` provides the chronological ordering the SDK contract requires. Partial unique index on `uuid WHERE uuid IS NOT NULL` enforces idempotency for entries with one (the SDK contract says non-uuid entries — titles, tags, mode markers — bypass dedup).
+
+**Adapter (`server/src/sessions/store.ts`).** Implements `append / load / listSessions / listSessionSummaries / delete / listSubkeys`. `append` runs in a transaction: upsert session row → INSERT OR IGNORE entries → recompute summary via `foldSessionSummary` and persist it. `load` returns null for missing sessions (the contract distinguishes "never written" from "emptied").
+
+**Retention.** New module `sessions/cleanup.ts`. At server boot, archive sessions idle > `SESSION_ARCHIVE_DAYS` (default 30) and delete sessions idle > `SESSION_DELETE_DAYS` (default 180). Pass 0 to disable either step. Archived sessions stay resumable but are filtered out of the default sidebar (`/sessions?includeArchived=true` to opt back in). FK cascade drops their entries on delete.
+
+**Migration.** New script `npm --workspace server run migrate-sessions` reads JSONL files from any of the legacy project keys (`C--Projects-home-ai`, `C--Projects-home-ai-server`, `C--Projects-home-ai-web`) and re-`append()`s them under the canonical key (`C--Projects-home-ai`). Re-keying lets the orphaned 8 sessions show up alongside new ones. Custom-built rather than using `importSessionToStore` because the latter doesn't support cross-project re-keying.
+
+**Why @alpha is OK here.** The `SessionStore` interface is annotated alpha but the contract for adapters is opaque-JSON pass-through — round-tripping `JSON.stringify`/`JSON.parse` is the only invariant. Internal entry shapes can change; we don't introspect them. Only `foldSessionSummary` and the `SessionSummaryEntry.data` field are SDK-internal — we treat the latter as opaque too.
+
+**Deferred.** `CLAUDE_CONFIG_DIR=/tmp` to drop persistent filesystem copies entirely. For now, dual-write keeps the JSONL as a safety net; flip it later when the adapter has weeks of stable use.
+
 ### 2026-04-28 · M4 phase 1 — sessions, slash commands, markdown rendering
 
 Three loosely-related QoL items shipped together because they share UI surface (sidebar layout, modal infra, message rendering).

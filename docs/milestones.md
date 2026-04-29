@@ -51,7 +51,9 @@ Split into three phases; each ships independently.
 
 ### Phase 1 — sessions, dashboard, markdown (shipped ✓)
 
-- [x] Multi-session persistence: left sidebar lists past chats (via Agent SDK `listSessions`), click to load history (`getSessionMessages`), "new chat" button starts fresh, hover→delete
+- [x] Multi-session persistence: left sidebar lists past chats, click to load history, "new chat" button starts fresh, hover→delete. Sessions are stored in SQLite via a `SessionStore` adapter (instead of the SDK's filesystem JSONL default), so the entire app state lives in `data/kg.sqlite` — single backup target, single source of truth.
+- [x] Retention sweeper: at server boot, sessions idle > `SESSION_ARCHIVE_DAYS` (default 30) are flagged `archived_at` (hidden from the sidebar by default); idle > `SESSION_DELETE_DAYS` (default 180) are deleted entirely. Both env-configurable; pass 0 to disable a step.
+- [x] Migration script `npm --workspace server run migrate-sessions` imports any pre-existing JSONL sessions (including ones orphaned under the workspace dir's project key) into the DB.
 - [x] Empty-state dashboard (replaces the slash-command pattern): when there are no messages in view, the chat area shows live KG stats + recent nodes + a forget input + export buttons. Disappears once chatting starts; reappears via "new chat".
 - [x] KG endpoints added (`/kg/recent`, `/kg/stats`, `/kg/by-name`, `/kg/node/:id`, `/kg/export?format=json|dot`) — same surface, now consumed by the dashboard.
 - [x] Backups / export — JSON (full snapshot minus embeddings) + Graphviz `.dot`, both as downloadable files via dashboard buttons.

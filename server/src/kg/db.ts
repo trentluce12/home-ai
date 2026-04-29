@@ -77,6 +77,41 @@ CREATE TABLE IF NOT EXISTS node_embeddings (
   dim INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS sessions (
+  project_key TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  last_active INTEGER NOT NULL,
+  archived_at INTEGER,
+  -- Sidecar JSON owned by the SDK's foldSessionSummary helper. Opaque to us.
+  summary_json TEXT,
+  PRIMARY KEY (project_key, session_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_last_active ON sessions(last_active DESC);
+
+CREATE TABLE IF NOT EXISTS session_entries (
+  -- ROWID provides chronological ordering within a session.
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_key TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  subpath TEXT NOT NULL DEFAULT '',
+  uuid TEXT,
+  type TEXT NOT NULL,
+  timestamp TEXT,
+  payload_json TEXT NOT NULL,
+  FOREIGN KEY (project_key, session_id)
+    REFERENCES sessions(project_key, session_id) ON DELETE CASCADE
+);
+
+-- Idempotency: SDK may replay entries with the same uuid; reject duplicates.
+-- Partial index — entries without uuids (titles, tags, mode markers) bypass dedup.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_session_entries_uuid
+  ON session_entries(uuid) WHERE uuid IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_session_entries_session
+  ON session_entries(project_key, session_id, subpath);
 `;
 
 db.exec(SCHEMA_SQL);
