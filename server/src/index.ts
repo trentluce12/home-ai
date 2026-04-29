@@ -24,18 +24,23 @@ ENTITY TYPES (the \`type\` field on nodes): Person, Place, Device, Project, Task
 
 EDGE TYPES (the \`type\` field on edges): KNOWS, LIVES_WITH, WORKS_AT, OWNS, LOCATED_IN, PART_OF, RELATES_TO, SCHEDULED_FOR, ASSIGNED_TO, PREFERS, DEPENDS_ON, MENTIONED_IN.
 
-THE USER'S NODE: A node with name "user" and type Person represents the user themselves. Most facts they share are about themselves, so most edges go from "user" → something. Create the user node on demand if it doesn't exist (the \`link\` tool handles this).
+THE USER'S NODE: A node with name "user" and type Person represents the user themselves. Most facts they share are about themselves, so most edges go from "user" → something. Create the user node on demand if it doesn't exist (the recording tools handle this).
 
 PASSIVE CONTEXT: Before each user turn, relevant facts from your KG are auto-injected as a <context> block before the user's message. Trust this context as the current state of memory and answer from it directly when it covers the question — no tool call needed. Only reach for \`search\` if the context block looks insufficient.
 
-SELF-LEARNING — when to save:
-- The user shares a fact worth remembering across conversations: people in their life, places, things they own, preferences, ongoing projects, events.
-- Use the \`link\` tool — it find-or-creates both nodes and adds the edge in one shot. Provide a \`type\` for any node that might not exist yet.
-- Examples:
-  - "I have a dog named Lily" → \`link\` with a={nameOrId:"user",type:"Person"}, b={nameOrId:"Lily",type:"Pet"}, edgeType:"OWNS"
-  - "I work at Acme" → user (Person) → Acme (Organization), edgeType:"WORKS_AT"
-  - "My favorite color is blue" → user → "blue" (Preference), edgeType:"PREFERS"
-- Don't ask permission. Don't over-record. Idle remarks ("I've been tired") aren't facts; clear assertions ("my favorite color is blue") are.
+RECORDING FACTS — two distinct tools:
+
+1. \`record_user_fact\` (high confidence) — use when the user DIRECTLY STATES something. The fact is asserted by them, so we trust it.
+   - "I have a dog named Snickers" → a={nameOrId:'user',type:'Person'}, b={nameOrId:'Snickers',type:'Pet'}, edgeType:'OWNS'
+   - "I work at Acme" → user → Acme (Organization), edgeType:'WORKS_AT'
+   - "My favorite color is blue" → user → "blue" (Preference), edgeType:'PREFERS'
+
+2. \`record_inferred_fact\` (lower confidence) — use ONLY when you derived a fact from context that the user did not directly state. Default confidence 0.5; raise it (toward 0.9) for near-certain inferences. Use this sparingly — most facts should come through \`record_user_fact\`.
+   - User mentions "my walk with Snickers this morning" — already known they own Snickers, no inference needed.
+   - User says "I've been thinking of taking Snickers to the vet" — inferring Snickers is sick is speculation; don't record.
+   - User describes a pattern across turns ("I keep forgetting to take my meds") — inferred Preference about a habit could be recorded with low confidence.
+
+When in doubt, prefer \`record_user_fact\`. Don't ask permission. Don't over-record idle remarks ("I've been tired"); record clear assertions.
 
 OTHER TOOLS:
 - File system (Read, Write, Edit, Glob, Grep) and Bash are available for tasks involving files or shell commands.
@@ -59,7 +64,7 @@ app.post("/chat", async (c) => {
     return c.json({ error: "Missing message" }, 400);
   }
 
-  const subgraph = retrieveSubgraph(userText);
+  const subgraph = await retrieveSubgraph(userText);
   const prompt = wrapWithContext(userText, subgraph.formatted);
 
   return streamSSE(c, async (stream) => {
@@ -144,11 +149,29 @@ app.post("/chat", async (c) => {
             break;
           }
           case "result": {
+            const usage = m.usage as
+              | {
+                  input_tokens?: number;
+                  output_tokens?: number;
+                  cache_creation_input_tokens?: number;
+                  cache_read_input_tokens?: number;
+                }
+              | undefined;
+            if (usage) {
+              const created = usage.cache_creation_input_tokens ?? 0;
+              const read = usage.cache_read_input_tokens ?? 0;
+              const input = usage.input_tokens ?? 0;
+              const output = usage.output_tokens ?? 0;
+              console.log(
+                `[chat] tokens: in=${input} out=${output} cache_create=${created} cache_read=${read}`,
+              );
+            }
             await stream.writeSSE({
               data: JSON.stringify({
                 type: "done",
                 success: m.subtype === "success",
                 totalCostUsd: m.total_cost_usd,
+                usage,
               }),
             });
             break;

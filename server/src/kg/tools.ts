@@ -1,10 +1,64 @@
 import { tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import * as kg from "./db.js";
+import { embedNodes } from "../embeddings/index.js";
+
+async function recordFact(input: {
+  a: { nameOrId: string; type?: string };
+  b: { nameOrId: string; type?: string };
+  edgeType: string;
+  edgeProps?: Record<string, unknown>;
+  source: kg.FactSource;
+  confidence: number;
+}) {
+  const result = kg.link({
+    a: input.a,
+    b: input.b,
+    edgeType: input.edgeType,
+    edgeProps: input.edgeProps,
+    confidence: input.confidence,
+  });
+
+  const newNodes: kg.Node[] = [];
+  if (result.created.aCreated) {
+    newNodes.push(result.a);
+    kg.recordProvenance({ factId: result.a.id, factKind: "node", source: input.source });
+  }
+  if (result.created.bCreated) {
+    newNodes.push(result.b);
+    kg.recordProvenance({ factId: result.b.id, factKind: "node", source: input.source });
+  }
+  kg.recordProvenance({ factId: result.edge.id, factKind: "edge", source: input.source });
+
+  if (newNodes.length > 0) {
+    try {
+      await embedNodes(newNodes);
+    } catch (err) {
+      // Non-fatal — FTS still works; hybrid retrieval skips this node on the
+      // cosine pass until an embedding exists.
+      console.warn("Embedding failed for new nodes:", err);
+    }
+  }
+
+  return result;
+}
+
+const factShape = {
+  a: z.object({
+    nameOrId: z.string(),
+    type: z.string().optional().describe("Required if the node may not exist yet"),
+  }),
+  b: z.object({
+    nameOrId: z.string(),
+    type: z.string().optional(),
+  }),
+  edgeType: z.string(),
+  edgeProps: z.record(z.string(), z.unknown()).optional(),
+};
 
 const searchTool = tool(
   "search",
-  "Full-text search over the knowledge graph. Returns matching nodes (Person, Place, Device, etc.). Use before answering personal-context questions.",
+  "Full-text search over the knowledge graph. Returns matching nodes (Person, Place, Device, etc.). Use only when the auto-injected <context> block looks insufficient.",
   {
     query: z.string().describe("Search query — matched against node names and properties"),
     types: z.array(z.string()).optional().describe("Filter by entity types"),
@@ -61,75 +115,51 @@ const neighborsTool = tool(
   },
 );
 
-const addNodeTool = tool(
-  "add_node",
-  "Create a new node. Prefer using `link` instead, which find-or-creates both nodes plus an edge in one shot. Use `add_node` only when you need a node without an immediate connection.",
-  {
-    type: z
-      .string()
-      .describe(
-        "Entity type — typically one of: Person, Place, Device, Project, Task, Event, Preference, Document, Topic, Organization, Pet",
-      ),
-    name: z.string().describe("Human-readable name"),
-    props: z.record(z.string(), z.unknown()).optional(),
-  },
+const recordUserFactTool = tool(
+  "record_user_fact",
+  "Record a fact the user directly stated. High confidence (1.0) — use this whenever the user makes a clear assertion about themselves, their life, their preferences, or their relationships. Examples: \"I have a dog named Snickers\" → a={nameOrId:'user',type:'Person'}, b={nameOrId:'Snickers',type:'Pet'}, edgeType:'OWNS'.",
+  factShape,
   async (args) => {
-    const node = kg.addNode({ type: args.type, name: args.name, props: args.props });
-    return {
-      content: [{ type: "text", text: `Created ${node.type} "${node.name}" (id: ${node.id})` }],
-    };
-  },
-);
-
-const addEdgeTool = tool(
-  "add_edge",
-  "Create a relationship between two existing nodes (use IDs from add_node, search, or link).",
-  {
-    fromId: z.string(),
-    toId: z.string(),
-    type: z
-      .string()
-      .describe(
-        "Edge type — typically one of: KNOWS, LIVES_WITH, WORKS_AT, OWNS, LOCATED_IN, PART_OF, RELATES_TO, SCHEDULED_FOR, ASSIGNED_TO, PREFERS, DEPENDS_ON, MENTIONED_IN",
-      ),
-    props: z.record(z.string(), z.unknown()).optional(),
-    confidence: z.number().min(0).max(1).optional().describe("0-1, default 1.0"),
-  },
-  async (args) => {
-    const edge = kg.addEdge(args);
-    return {
-      content: [
-        {
-          type: "text",
-          text: `Created edge ${edge.type}: ${edge.fromId} → ${edge.toId} (id: ${edge.id})`,
-        },
-      ],
-    };
-  },
-);
-
-const linkTool = tool(
-  "link",
-  "Find-or-create two nodes by name and connect them. THIS IS THE WORKHORSE for self-learning — prefer it over manual add_node + add_edge whenever you're recording a new fact about the user. If a node doesn't exist yet, you must provide a `type` so it can be auto-created.",
-  {
-    a: z.object({
-      nameOrId: z.string(),
-      type: z.string().optional().describe("Required if the node may not exist yet"),
-    }),
-    b: z.object({
-      nameOrId: z.string(),
-      type: z.string().optional(),
-    }),
-    edgeType: z.string(),
-    edgeProps: z.record(z.string(), z.unknown()).optional(),
-    confidence: z.number().min(0).max(1).optional(),
-  },
-  async (args) => {
-    const result = kg.link(args);
+    const result = await recordFact({
+      ...args,
+      source: "user_statement",
+      confidence: 1.0,
+    });
     const summary = `${result.a.type} "${result.a.name}" -[${result.edge.type}]-> ${result.b.type} "${result.b.name}"`;
     const noteA = result.created.aCreated ? ` (new: ${result.a.id})` : "";
     const noteB = result.created.bCreated ? ` (new: ${result.b.id})` : "";
-    return { content: [{ type: "text", text: `Linked: ${summary}${noteA}${noteB}` }] };
+    return {
+      content: [{ type: "text", text: `Recorded (user-stated): ${summary}${noteA}${noteB}` }],
+    };
+  },
+);
+
+const recordInferredFactTool = tool(
+  "record_inferred_fact",
+  "Record a fact you inferred from context (NOT directly stated by the user). Lower default confidence (0.5). Use sparingly — only when the inference is clear and useful for future recall. Most facts should come through `record_user_fact` instead.",
+  {
+    ...factShape,
+    confidence: z
+      .number()
+      .min(0)
+      .max(1)
+      .optional()
+      .describe("0–1, default 0.5. Higher when the inference is near-certain."),
+  },
+  async (args) => {
+    const result = await recordFact({
+      a: args.a,
+      b: args.b,
+      edgeType: args.edgeType,
+      edgeProps: args.edgeProps,
+      source: "agent_inference",
+      confidence: args.confidence ?? 0.5,
+    });
+    const summary = `${result.a.type} "${result.a.name}" -[${result.edge.type}]-> ${result.b.type} "${result.b.name}"`;
+    const conf = (args.confidence ?? 0.5).toFixed(2);
+    return {
+      content: [{ type: "text", text: `Recorded (inferred, conf=${conf}): ${summary}` }],
+    };
   },
 );
 
@@ -173,14 +203,13 @@ const statsTool = tool(
 
 export const kgServer = createSdkMcpServer({
   name: "kg",
-  version: "0.1.0",
+  version: "0.2.0",
   tools: [
     searchTool,
     getTool,
     neighborsTool,
-    addNodeTool,
-    addEdgeTool,
-    linkTool,
+    recordUserFactTool,
+    recordInferredFactTool,
     updateNodeTool,
     recentTool,
     statsTool,
@@ -191,9 +220,8 @@ export const KG_TOOL_NAMES = [
   "mcp__kg__search",
   "mcp__kg__get",
   "mcp__kg__neighbors",
-  "mcp__kg__add_node",
-  "mcp__kg__add_edge",
-  "mcp__kg__link",
+  "mcp__kg__record_user_fact",
+  "mcp__kg__record_inferred_fact",
   "mcp__kg__update_node",
   "mcp__kg__recent",
   "mcp__kg__stats",

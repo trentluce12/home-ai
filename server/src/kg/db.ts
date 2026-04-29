@@ -69,6 +69,14 @@ CREATE TABLE IF NOT EXISTS provenance (
 );
 
 CREATE INDEX IF NOT EXISTS idx_provenance_fact_id ON provenance(fact_id);
+
+CREATE TABLE IF NOT EXISTS node_embeddings (
+  node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+  model TEXT NOT NULL,
+  vector BLOB NOT NULL,
+  dim INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 `;
 
 db.exec(SCHEMA_SQL);
@@ -91,6 +99,9 @@ export const NODE_TYPES = [
   "Organization",
   "Pet",
 ] as const;
+
+export const FACT_SOURCES = ["user_statement", "agent_inference", "seed"] as const;
+export type FactSource = (typeof FACT_SOURCES)[number];
 
 export const EDGE_TYPES = [
   "KNOWS",
@@ -372,6 +383,67 @@ export function recentNodes(limit: number = 10): Node[] {
     .prepare(`SELECT * FROM nodes ORDER BY updated_at DESC LIMIT ?`)
     .all(limit) as NodeRow[];
   return rows.map(nodeFromRow);
+}
+
+export function recordProvenance(input: {
+  factId: string;
+  factKind: "node" | "edge";
+  source: FactSource;
+  sourceRef?: string;
+}): void {
+  db.prepare(
+    `INSERT INTO provenance (fact_id, fact_kind, source, source_ref, created_at) VALUES (?, ?, ?, ?, ?)`,
+  ).run(input.factId, input.factKind, input.source, input.sourceRef ?? null, Date.now());
+}
+
+function encodeVector(vec: number[] | Float32Array): Buffer {
+  const f32 = vec instanceof Float32Array ? vec : new Float32Array(vec);
+  return Buffer.from(f32.buffer, f32.byteOffset, f32.byteLength);
+}
+
+function decodeVector(buf: Buffer): Float32Array {
+  // Copy into a fresh Float32Array so callers don't have to worry about
+  // alignment or shared-buffer aliasing with other rows.
+  const out = new Float32Array(buf.byteLength / 4);
+  out.set(new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4));
+  return out;
+}
+
+export function upsertEmbedding(input: {
+  nodeId: string;
+  model: string;
+  vector: number[] | Float32Array;
+}): void {
+  const dim = input.vector.length;
+  const blob = encodeVector(input.vector);
+  db.prepare(
+    `INSERT INTO node_embeddings (node_id, model, vector, dim, updated_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(node_id) DO UPDATE SET
+       model = excluded.model,
+       vector = excluded.vector,
+       dim = excluded.dim,
+       updated_at = excluded.updated_at`,
+  ).run(input.nodeId, input.model, blob, dim, Date.now());
+}
+
+export interface NodeEmbedding {
+  nodeId: string;
+  model: string;
+  vector: Float32Array;
+  dim: number;
+}
+
+export function getAllEmbeddings(): NodeEmbedding[] {
+  const rows = db
+    .prepare(`SELECT node_id, model, vector, dim FROM node_embeddings`)
+    .all() as { node_id: string; model: string; vector: Buffer; dim: number }[];
+  return rows.map((r) => ({
+    nodeId: r.node_id,
+    model: r.model,
+    vector: decodeVector(r.vector),
+    dim: r.dim,
+  }));
 }
 
 export function kgStats(): {

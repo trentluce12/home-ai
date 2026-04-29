@@ -33,13 +33,17 @@ Verified: chat works end-to-end with streaming.
 - [x] Enabled `includePartialMessages` — text now streams token-by-token via `stream_event` deltas
 - [x] Smoke test: with "user OWNS Snickers" seeded, "what's my dog's name?" answers from injected context without a `search` tool call
 
-## M3 — embeddings + hybrid retrieval
+## M3 — embeddings + hybrid retrieval (shipped ✓)
 
-- [ ] Add `node_embeddings` table (BLOB column for vectors)
-- [ ] Compute embeddings on node create/update (provider TBD: Voyage / OpenAI / local sentence-transformers)
-- [ ] Hybrid retrieval: FTS + cosine similarity + graph expansion
-- [ ] Provenance + confidence on facts (lower for agent-extracted, higher for user-stated)
-- [ ] Cache the system + tools prefix; subgraph context goes after the breakpoint
+- [x] `node_embeddings(node_id PK, model, vector BLOB, dim, updated_at)` table; Float32Array packed BLOB; FK cascade on node delete
+- [x] Voyage `voyage-3-large` provider, `input_type: "document"` for nodes / `"query"` for user messages; `VOYAGE_API_KEY` from `.env`
+- [x] Hybrid retrieval: FTS rank list + cosine rank list → Reciprocal Rank Fusion (k=60) → top-K → 1-hop expansion. In-memory cosine over rehydrated vectors (swap to `sqlite-vec` when KG > ~10K nodes).
+- [x] Embedding failures (Voyage 5xx, missing key, quota) are non-fatal at retrieval time: server logs and falls back to FTS-only.
+- [x] Provenance: every node/edge created via tools or seed writes a row to `provenance` (source ∈ `user_statement | agent_inference | seed`). Edges carry confidence: 1.0 for user-stated/seed, 0.5 default for inferred.
+- [x] `link` tool replaced with `record_user_fact` (high confidence) and `record_inferred_fact` (low confidence, optional override). System prompt teaches the heuristic — direct assertion vs. derived guess.
+- [x] Cache observability: server logs `cache_create`/`cache_read` token counts on each result. Subgraph already lives in the user message (M2), so the `system + tools` prefix stays cache-eligible.
+- [x] Smoke test: "what's the name of my pet?" (no token overlap with "Snickers") returns "Snickers" with no `search` tool call; sidebar shows context retrieval.
+- [x] `cache_read_input_tokens > 0` on the second turn of a session.
 
 ## M4 — quality of life
 

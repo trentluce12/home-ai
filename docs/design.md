@@ -12,6 +12,33 @@ A personal AI: streaming chat UI on top of the Anthropic API. Knowledge graph co
 
 Newest first. Append entries; don't edit history.
 
+### 2026-04-28 · M3 — Voyage embeddings + RRF hybrid retrieval + provenance
+
+**Storage.** New `node_embeddings(node_id PK FK, model, vector BLOB, dim, updated_at)` table. Vectors packed as Float32Array bytes. Decode copies into a fresh array to avoid alias-with-buffer pitfalls across rows. FK cascade so deleting a node removes its embedding.
+
+**Provider.** Voyage `voyage-3-large` via `fetch` (no SDK dep). `input_type: "document"` when embedding nodes, `"query"` for user messages — Voyage uses different projections under the hood and the asymmetric mode measurably helps retrieval. Failures bubble up in the seed (intentional — fail loud at dev startup if the key is missing) and are caught + logged at retrieval time (intentional — chat keeps working in FTS-only mode if Voyage has a hiccup).
+
+**Retrieval.** `retrieve.ts` is now async. Per turn:
+1. FTS query — tokens joined with \`OR\`, ordered by bm25 \`rank\`.
+2. Cosine — embed the user message once, brute-force cosine against every persisted embedding, sort desc.
+3. **Reciprocal Rank Fusion** (k=60) over the two ranked id lists. RRF was the right call vs weighted alpha — no normalization, no tuning, robust to either retriever returning weak scores.
+4. Top-K fused → 1-hop expand (M2 path) → format.
+
+In-memory cosine is fine until the KG passes ~10K nodes. Swap to `sqlite-vec` when that becomes a real concern.
+
+**Provenance and confidence.** Schema already had a `provenance` table (defined in M1, never written to). M3 fills it. Every node/edge created via the recording tools or the seed gets a row with `source ∈ user_statement | agent_inference | seed`. Edge confidence is set per source: 1.0 for user-stated/seed, 0.5 default for inferred (the agent can override 0–1).
+
+**Tool surface change — `link` split into two.** The agent now calls `record_user_fact` (when the user directly states something) or `record_inferred_fact` (for derivations). System prompt got a recording-section rewrite with examples on each side and explicit "when in doubt, prefer record_user_fact" guidance. Rationale for the split (vs an extended \`link\` with a \`source\` arg): the tool name carries the semantic — there's no way to "accidentally" record an inference as a user fact, and the model's tool-choice behavior matches its assertion confidence cleanly. \`add_node\` and \`add_edge\` were also dropped from the tool surface; they remain as library functions for `seed.ts` and the recording tools to call internally.
+
+**Caching.** M2 already put the subgraph in the user message, so the `system + tools` prefix is naturally cache-eligible. The result handler now logs `cache_creation_input_tokens` and `cache_read_input_tokens` per turn so cache hits are visible in the server log. No SDK knob needed — the Anthropic API caches stable prefixes automatically. Verified live: turn 2 of a session shows `cache_read > 0`.
+
+**Verified live.** "What's the name of my pet?" — zero token overlap with "Snickers" — returns "Snickers" without a `search` tool call. Sidebar shows the context retrieval card. Hybrid retrieval is doing the work FTS-only couldn't.
+
+**Deferred:**
+- **Token budget on the subgraph.** Still hard-capped at 20 nodes; real token counting waits until cache hit rates make it matter.
+- **Re-embedding on update.** `update_node` currently changes name/props but doesn't refresh the embedding. Easy fix when a name change actually moves retrieval results enough to matter.
+- **Embedding cache in process memory.** Each retrieval call rehydrates all embeddings from SQLite. Negligible at current scale; cache when KG growth makes it visible.
+
 ### 2026-04-28 · M2 — passive subgraph + session resumption + token streaming
 
 Three changes landed together because they touch the same prompt-construction path.
