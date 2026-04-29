@@ -16,13 +16,129 @@ interface SeedFact {
 }
 
 // Source of truth for what home-ai "knows" at dev startup. Append as the
-// project grows — each entry maps to one `user → thing` edge.
+// project grows.
+//
+// IMPORTANT: every fact here is asserted as true about the user. Don't seed
+// names/relationships you can't verify — the AI will treat them as
+// established memory.
 const FACTS: SeedFact[] = [
+  // ─── Pets ───────────────────────────────────────────────────────
   {
     a: { nameOrId: "user", type: "Person" },
     b: { nameOrId: "Snickers", type: "Pet" },
     edgeType: "OWNS",
   },
+
+  // ─── This project ───────────────────────────────────────────────
+  {
+    a: { nameOrId: "user", type: "Person" },
+    b: { nameOrId: "home-ai", type: "Project" },
+    edgeType: "OWNS",
+  },
+
+  // ─── home-ai's tech stack ──────────────────────────────────────
+  {
+    a: { nameOrId: "home-ai", type: "Project" },
+    b: { nameOrId: "TypeScript", type: "Topic" },
+    edgeType: "DEPENDS_ON",
+  },
+  {
+    a: { nameOrId: "home-ai", type: "Project" },
+    b: { nameOrId: "React", type: "Topic" },
+    edgeType: "DEPENDS_ON",
+  },
+  {
+    a: { nameOrId: "home-ai", type: "Project" },
+    b: { nameOrId: "Vite", type: "Topic" },
+    edgeType: "DEPENDS_ON",
+  },
+  {
+    a: { nameOrId: "home-ai", type: "Project" },
+    b: { nameOrId: "Tailwind CSS", type: "Topic" },
+    edgeType: "DEPENDS_ON",
+  },
+  {
+    a: { nameOrId: "home-ai", type: "Project" },
+    b: { nameOrId: "Hono", type: "Topic" },
+    edgeType: "DEPENDS_ON",
+  },
+  {
+    a: { nameOrId: "home-ai", type: "Project" },
+    b: { nameOrId: "SQLite", type: "Topic" },
+    edgeType: "DEPENDS_ON",
+  },
+  {
+    a: { nameOrId: "home-ai", type: "Project" },
+    b: { nameOrId: "Node.js", type: "Topic" },
+    edgeType: "DEPENDS_ON",
+  },
+
+  // ─── External services home-ai integrates with ────────────────
+  {
+    a: { nameOrId: "home-ai", type: "Project" },
+    b: { nameOrId: "Anthropic", type: "Organization" },
+    edgeType: "DEPENDS_ON",
+  },
+  {
+    a: { nameOrId: "home-ai", type: "Project" },
+    b: { nameOrId: "Voyage AI", type: "Organization" },
+    edgeType: "DEPENDS_ON",
+  },
+  {
+    a: { nameOrId: "Anthropic", type: "Organization" },
+    b: { nameOrId: "Claude", type: "Topic" },
+    edgeType: "RELATES_TO",
+  },
+
+  // ─── Concept space the project is in ──────────────────────────
+  {
+    a: { nameOrId: "home-ai", type: "Project" },
+    b: { nameOrId: "Knowledge graphs", type: "Topic" },
+    edgeType: "RELATES_TO",
+  },
+  {
+    a: { nameOrId: "home-ai", type: "Project" },
+    b: { nameOrId: "Personal AI", type: "Topic" },
+    edgeType: "RELATES_TO",
+  },
+  {
+    a: { nameOrId: "home-ai", type: "Project" },
+    b: { nameOrId: "Retrieval-augmented generation", type: "Topic" },
+    edgeType: "RELATES_TO",
+  },
+  {
+    a: { nameOrId: "home-ai", type: "Project" },
+    b: { nameOrId: "Embeddings", type: "Topic" },
+    edgeType: "RELATES_TO",
+  },
+  {
+    a: { nameOrId: "Embeddings", type: "Topic" },
+    b: { nameOrId: "Voyage AI", type: "Organization" },
+    edgeType: "RELATES_TO",
+  },
+
+  // ─── User's interests, inferred from the codebase ──────────────
+  {
+    a: { nameOrId: "user", type: "Person" },
+    b: { nameOrId: "TypeScript", type: "Topic" },
+    edgeType: "PREFERS",
+  },
+  {
+    a: { nameOrId: "user", type: "Person" },
+    b: { nameOrId: "Knowledge graphs", type: "Topic" },
+    edgeType: "PREFERS",
+  },
+  {
+    a: { nameOrId: "user", type: "Person" },
+    b: { nameOrId: "Personal AI", type: "Topic" },
+    edgeType: "PREFERS",
+  },
+
+  // ─── Personal facts: paste your own here ──────────────────────
+  // Examples (delete and replace with real ones):
+  //   { a: {nameOrId: "user", type: "Person"}, b: {nameOrId: "Acme", type: "Organization"}, edgeType: "WORKS_AT" },
+  //   { a: {nameOrId: "user", type: "Person"}, b: {nameOrId: "Austin", type: "Place"}, edgeType: "LIVES_WITH" },
+  //   { a: {nameOrId: "user", type: "Person"}, b: {nameOrId: "running", type: "Preference"}, edgeType: "PREFERS" },
 ];
 
 function reset() {

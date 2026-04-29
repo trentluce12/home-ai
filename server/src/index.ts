@@ -292,11 +292,36 @@ app.get("/kg/by-name/:name", (c) => {
   return c.json(withNeighbors);
 });
 
+app.get("/kg/node/:id", (c) => {
+  const id = c.req.param("id");
+  const node = kg.getNode(id);
+  if (!node) return c.json({ error: "Node not found" }, 404);
+  const neighbors = kg.neighbors({ nodeId: id });
+  const provenance = db
+    .prepare(
+      `SELECT source, source_ref as sourceRef, created_at as createdAt
+       FROM provenance WHERE fact_id = ? AND fact_kind = 'node'
+       ORDER BY created_at DESC`,
+    )
+    .all(id) as { source: string; sourceRef: string | null; createdAt: number }[];
+  return c.json({ node, neighbors, provenance });
+});
+
 app.delete("/kg/node/:id", (c) => {
   const id = c.req.param("id");
   const result = kg.deleteNode(id);
   if (!result.deleted) return c.json({ error: "Node not found" }, 404);
   return c.json(result);
+});
+
+app.get("/kg/graph", (c) => {
+  const nodes = db
+    .prepare(`SELECT id, name, type FROM nodes`)
+    .all() as { id: string; name: string; type: string }[];
+  const edges = db
+    .prepare(`SELECT id, from_id as fromId, to_id as toId, type FROM edges`)
+    .all() as { id: string; fromId: string; toId: string; type: string }[];
+  return c.json({ nodes, edges });
 });
 
 app.get("/kg/export", (c) => {

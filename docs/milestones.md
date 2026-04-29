@@ -62,10 +62,17 @@ Split into three phases; each ships independently.
 - [x] Layout reshuffled to 3 columns (chats / chat / memory) on `lg+`; smaller breakpoints hide both sidebars.
 - [x] Smoke tests: dashboard loads with seeded counts, forget flow works, markdown renders, sessions sidebar persists across refresh, SessionStore adapter writes show up in `data/kg.sqlite`.
 
-### Phase 2 — graph visualization (locked, not started)
+### Phase 2 — graph visualization (shipped ✓)
 
-- [ ] sigma.js panel (chosen for long-term scaling vs react-force-graph) — toggleable view of the KG, live-updates on new facts
-- [ ] `GET /kg/graph` endpoint returning sigma-friendly node/edge shapes
+- [x] Sigma.js + graphology with FA2 worker layout (animated for ~4s on open, then settles).
+- [x] Full-screen modal opened via a Network icon in the header. ESC closes.
+- [x] Hover a node → highlight neighborhood (everything else dims, non-incident edges hide). Click → side panel with props, neighbors, provenance.
+- [x] Filter chips per entity type along the top — toggle to hide/show.
+- [x] Color-coded by entity type (Person/Pet/Project/Topic/Organization/etc.); node size scales with degree so hubs stand out.
+- [x] `GET /kg/graph` returns `{nodes: [{id, name, type}], edges: [{id, fromId, toId, type}]}`. `GET /kg/node/:id` returns `{node, neighbors, provenance}` for the detail panel.
+- [x] Refresh: re-fetched on every modal open + on every `done` SSE event from /chat (so new facts show up live if the modal is open).
+- [x] Seed expanded to 17 nodes / 20 edges (project + tech stack + service providers + topic space) so the graph isn't a single dot.
+- [x] Smoke tests: graph opens with FA2 settling, hover highlights, click opens detail panel, filter chips hide/show types, live-refreshes on chat completion.
 
 ### Phase 3 — bulk import (deferred)
 

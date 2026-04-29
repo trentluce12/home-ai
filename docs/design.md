@@ -12,6 +12,31 @@ A personal AI: streaming chat UI on top of the Anthropic API. Knowledge graph co
 
 Newest first. Append entries; don't edit history.
 
+### 2026-04-28 · M4 phase 2 — sigma.js memory graph
+
+Full-screen graph viz, opened via a Network icon in the header. New `GraphView` component is self-contained: fetches `/kg/graph` on open (and on every chat-completion `done` if the modal is up), builds a `graphology` Graph, places nodes with the circular layout helper, then runs `FA2Layout` (the worker variant) for ~4 seconds before stopping the simulation.
+
+**Stack call.** Sigma + graphology + graphology-layout + graphology-layout-forceatlas2 (worker entry). All authored under the same umbrella; the worker version keeps the layout off the main thread so the UI stays responsive while FA2 settles. Picked sigma over react-force-graph because the user wants headroom — sigma's WebGL-canvas split scales further than react-force-graph's pure-canvas approach.
+
+**Visual encoding.** Each entity type gets a color (Person/Pet/Project/Topic/Organization/etc.). Node radius = `4 + min(degree * 1.4, 14)` so hubs (the user node, home-ai) read as central. Edges show their type as a label, drawn faintly to keep the foreground readable.
+
+**Interaction.**
+- Click a node → fetch `/kg/node/:id` and slide a side panel in with props, neighbors, and provenance.
+- Hover a node → `nodeReducer`/`edgeReducer` dim everything outside the 1-hop neighborhood and hide non-incident edges. Refresh on enter/leave.
+- Filter chips per entity type at the top — clicking toggles a `hidden` Set. Re-renders the graph minus that type, edges incident to hidden nodes are dropped automatically.
+
+**Backend.** Two endpoints:
+- `GET /kg/graph` — flat `{nodes: [{id, name, type}], edges: [{id, fromId, toId, type}]}`. Embeddings and props left out — node detail comes from a separate fetch on click.
+- `GET /kg/node/:id` — `{node, neighbors, provenance}` for the detail panel. Provenance read directly from the table (no API for it before).
+
+**Seed expanded.** From 1 fact (`user OWNS Snickers`) to 20 — added `home-ai` as a Project, the tech stack as Topics with `DEPENDS_ON` edges, Anthropic + Voyage AI as Organizations, and the conceptual neighborhood (Knowledge graphs / Personal AI / RAG / Embeddings) as Topics with `RELATES_TO`. All facts are derivable from the codebase — no fabricated personal info. A clearly-marked block at the bottom of `seed.ts` invites the user to paste real personal facts (family, employer, places, preferences) which the inferred-from-codebase facts can't supply.
+
+**Deferred.**
+- Search box (jump to a node by name).
+- Saved layout coordinates (so the graph doesn't reshape every open).
+- Edge filtering by type (currently only nodes filter; cascade through edges).
+- Subgraph view (focus on a single node + N-hop neighborhood).
+
 ### 2026-04-28 · M4 phase 1.5 — sessions move into SQLite via SessionStore adapter
 
 The cwd-encoding incident (sessions saved under `C--Projects-home-ai-server` because npm workspaces start the server with `cwd = server/` and `listSessions({dir})` derives a different project key) made the filesystem-backed storage feel fragile. Pivoted to the SDK's `SessionStore` adapter interface: app owns the storage, SDK uses our adapter for read/resume/list/delete.

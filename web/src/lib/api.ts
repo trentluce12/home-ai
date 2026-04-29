@@ -55,6 +55,17 @@ export interface NodeWithNeighbors {
   neighbors: { edge: KgEdge; node: KgNode }[];
 }
 
+export interface GraphData {
+  nodes: { id: string; name: string; type: string }[];
+  edges: { id: string; fromId: string; toId: string; type: string }[];
+}
+
+export interface NodeDetail {
+  node: KgNode;
+  neighbors: { edge: KgEdge; node: KgNode }[];
+  provenance: { source: string; sourceRef: string | null; createdAt: number }[];
+}
+
 async function jsonFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${SERVER_URL}${path}`, init);
   if (!res.ok) {
@@ -78,4 +89,6 @@ export const api = {
       method: "DELETE",
     }),
   exportUrl: (format: "json" | "dot") => `${SERVER_URL}/kg/export?format=${format}`,
+  graph: () => jsonFetch<GraphData>("/kg/graph"),
+  nodeDetail: (id: string) => jsonFetch<NodeDetail>(`/kg/node/${id}`),
 };

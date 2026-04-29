@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { ArrowUp } from "lucide-react";
+import { ArrowUp, Network } from "lucide-react";
 import { MessageBubble } from "./components/MessageBubble";
 import { MemoryPanel } from "./components/MemoryPanel";
 import { SessionList } from "./components/SessionList";
 import { EmptyDashboard } from "./components/EmptyDashboard";
+import { GraphView } from "./components/GraphView";
 import { api, SERVER_URL, type Message, type MemoryEvent } from "./lib/api";
 
 export default function App() {
@@ -14,6 +15,7 @@ export default function App() {
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [graphOpen, setGraphOpen] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -162,9 +164,19 @@ export default function App() {
           <span className="text-zinc-600">·</span>
           <span className="text-zinc-500">ai</span>
         </div>
-        {streaming && (
-          <span className="text-xs text-zinc-500 animate-pulse">thinking…</span>
-        )}
+        <div className="flex items-center gap-3">
+          {streaming && (
+            <span className="text-xs text-zinc-500 animate-pulse">thinking…</span>
+          )}
+          <button
+            onClick={() => setGraphOpen(true)}
+            aria-label="open memory graph"
+            title="Memory graph"
+            className="flex h-7 w-7 items-center justify-center rounded text-zinc-400 transition hover:bg-zinc-900 hover:text-zinc-100"
+          >
+            <Network className="h-3.5 w-3.5" />
+          </button>
+        </div>
       </header>
 
       <div className="flex flex-1 min-h-0 overflow-hidden">
@@ -227,6 +239,12 @@ export default function App() {
           </p>
         </div>
       </footer>
+
+      <GraphView
+        open={graphOpen}
+        onClose={() => setGraphOpen(false)}
+        refreshKey={refreshKey}
+      />
     </div>
   );
 }
