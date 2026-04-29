@@ -26,9 +26,13 @@ When making non-trivial decisions, append an entry to `docs/design.md`. When fin
 
 ## Useful commands
 
-- `npm run dev` — start both servers
+- `npm run dev` — start both servers (wipes the KG and reseeds it from `server/src/seed.ts` first)
 - `npm run typecheck` — typecheck both workspaces
 - `/check` — same as above, via slash command
+
+## Seed data
+
+`server/src/seed.ts` is the source of truth for what the KG knows at dev startup. It runs as part of `predev`, so each `npm run dev` resets the database to exactly what's in the `FACTS` array. Append entries as the project gains knowledge worth pinning. Don't rely on facts learned in prior chat sessions surviving a dev restart.
 
 ## Don't add until needed
 

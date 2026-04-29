@@ -11,25 +11,27 @@
 
 Verified: chat works end-to-end with streaming.
 
-## M1 — knowledge graph + self-learning tools
+## M1 — knowledge graph + self-learning tools (shipped ✓)
 
-- [ ] SQLite database in `data/kg.sqlite` via `better-sqlite3`
-- [ ] Schema: `nodes`, `edges`, `nodes_fts`, `provenance`
-- [ ] KG tools registered with the SDK: `kg_search`, `kg_get`, `kg_neighbors`, `kg_add_node`, `kg_add_edge`, `kg_link`, `kg_update_node`, `kg_recent`, `kg_stats`
-- [ ] Tool runner loop on the backend
-- [ ] System prompt updated to instruct self-learning (record new facts via tools)
-- [ ] UI sidebar showing "what I remembered this turn"
-- [ ] Smoke test: "I have a dog named Lily" → KG inspection shows Person, Pet, OWNS edge
+- [x] SQLite database in `data/kg.sqlite` via `better-sqlite3`
+- [x] Schema: `nodes`, `edges`, `nodes_fts`, `provenance`
+- [x] KG tools registered as `mcp__kg__*`: `search`, `get`, `neighbors`, `add_node`, `add_edge`, `link`, `update_node`, `recent`, `stats`
+- [x] Agent SDK `query()` loop on the backend with built-ins (Bash, Read, Write, Edit, Glob, Grep, WebFetch, WebSearch) enabled
+- [x] System prompt extended with home-ai persona + self-learning + lookup guidance
+- [x] UI sidebar ("memory" panel) streams tool activity from SSE
+- [x] Smoke test passed: "I have a dog named Lily" → Person, Pet, OWNS edge in KG
 
-**SDK** (locked 2026-04-28): Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`). The M1 backend uses `query()` to drive the agent loop, with KG tools registered alongside the SDK's built-ins. See `docs/design.md` for rationale.
+**SDK**: Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`) with `permissionMode: "bypassPermissions"` for the personal-trusted environment. See `docs/design.md`.
 
-## M2 — passive subgraph injection
+## M2 — passive subgraph injection (shipped ✓)
 
-- [ ] On each turn: FTS search over the user's prompt → expand 1 hop → format as compact context block
-- [ ] Inject as additional system message (or pre-pended user message)
-- [ ] Cap subgraph size (start at 20 nodes / ~2K tokens; tune)
-- [ ] UI: sidebar shows what was injected this turn (transparent retrieval)
-- [ ] Test: after recording "my dog is Lily" once, "what's my dog's name?" answers without a tool call
+- [x] On each turn: FTS search over the user's prompt → expand 1 hop → format as compact context block
+- [x] Inject by wrapping the user message in a `<context>` block (cache-friendly — system prompt prefix stays stable for M3)
+- [x] Cap subgraph size (20-node hard cap; token cap deferred until embeddings land in M3)
+- [x] UI: sidebar shows context retrievals (sky dot) alongside tool calls (emerald/zinc), with `Nn / Me` counts
+- [x] Switched from stateless transcripts to Agent SDK session resumption (`resume: sessionId`); frontend tracks sessionId across turns
+- [x] Enabled `includePartialMessages` — text now streams token-by-token via `stream_event` deltas
+- [x] Smoke test: with "user OWNS Snickers" seeded, "what's my dog's name?" answers from injected context without a `search` tool call
 
 ## M3 — embeddings + hybrid retrieval
 

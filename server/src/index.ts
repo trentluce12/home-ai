@@ -2,56 +2,163 @@ import { config } from "dotenv";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { serve } from "@hono/node-server";
+import { Hono } from "hono";
+import { cors } from "hono/cors";
+import { streamSSE } from "hono/streaming";
+import { query } from "@anthropic-ai/claude-agent-sdk";
+import { kgServer, KG_TOOL_NAMES } from "./kg/tools.js";
+import { retrieveSubgraph } from "./kg/retrieve.js";
 
 // Load .env from the project root (one level above server/)
 const __dirname = dirname(fileURLToPath(import.meta.url));
 config({ path: resolve(__dirname, "../../.env") });
 
-import { Hono } from "hono";
-import { cors } from "hono/cors";
-import { streamSSE } from "hono/streaming";
-import Anthropic from "@anthropic-ai/sdk";
-
 const app = new Hono();
-
 app.use("*", cors({ origin: "http://localhost:5173" }));
 
-const client = new Anthropic();
+const SYSTEM_PROMPT = `You are home-ai — a personal AI for the user. You are warm, direct, and concise. Match the user's tone and length: terse questions get terse answers, open questions can get longer ones. Never preface with filler like "I'd be happy to help" or "Of course!". When you don't know something, say so.
 
-const SYSTEM_PROMPT = `You are home-ai — a personal AI for the user. You are warm, direct, and concise. Answer questions, brainstorm, help with tasks, or just chat. Match the user's tone and length: terse questions get terse answers, open questions can get longer ones. Never preface with filler like "I'd be happy to help" or "Of course!". When you don't know something, say so.`;
+You have a personal knowledge graph (KG) that persists across conversations — it's how you remember facts about the user's life: people they know, places they live or visit, devices they own, projects, events, preferences, documents, topics, organizations, pets.
+
+ENTITY TYPES (the \`type\` field on nodes): Person, Place, Device, Project, Task, Event, Preference, Document, Topic, Organization, Pet.
+
+EDGE TYPES (the \`type\` field on edges): KNOWS, LIVES_WITH, WORKS_AT, OWNS, LOCATED_IN, PART_OF, RELATES_TO, SCHEDULED_FOR, ASSIGNED_TO, PREFERS, DEPENDS_ON, MENTIONED_IN.
+
+THE USER'S NODE: A node with name "user" and type Person represents the user themselves. Most facts they share are about themselves, so most edges go from "user" → something. Create the user node on demand if it doesn't exist (the \`link\` tool handles this).
+
+PASSIVE CONTEXT: Before each user turn, relevant facts from your KG are auto-injected as a <context> block before the user's message. Trust this context as the current state of memory and answer from it directly when it covers the question — no tool call needed. Only reach for \`search\` if the context block looks insufficient.
+
+SELF-LEARNING — when to save:
+- The user shares a fact worth remembering across conversations: people in their life, places, things they own, preferences, ongoing projects, events.
+- Use the \`link\` tool — it find-or-creates both nodes and adds the edge in one shot. Provide a \`type\` for any node that might not exist yet.
+- Examples:
+  - "I have a dog named Lily" → \`link\` with a={nameOrId:"user",type:"Person"}, b={nameOrId:"Lily",type:"Pet"}, edgeType:"OWNS"
+  - "I work at Acme" → user (Person) → Acme (Organization), edgeType:"WORKS_AT"
+  - "My favorite color is blue" → user → "blue" (Preference), edgeType:"PREFERS"
+- Don't ask permission. Don't over-record. Idle remarks ("I've been tired") aren't facts; clear assertions ("my favorite color is blue") are.
+
+OTHER TOOLS:
+- File system (Read, Write, Edit, Glob, Grep) and Bash are available for tasks involving files or shell commands.
+- Web tools (WebFetch, WebSearch) for current information.
+- For personal-context questions, prefer the KG (and the auto-injected context) before reaching for the web.`;
+
+interface ChatRequest {
+  message: string;
+  sessionId?: string;
+}
+
+function wrapWithContext(userText: string, contextBlock: string): string {
+  if (!contextBlock) return userText;
+  return `<context>\n${contextBlock}\n</context>\n\n${userText}`;
+}
 
 app.post("/chat", async (c) => {
-  const { messages } = await c.req.json<{ messages: Anthropic.MessageParam[] }>();
+  const body = await c.req.json<ChatRequest>();
+  const userText = body.message?.trim();
+  if (!userText) {
+    return c.json({ error: "Missing message" }, 400);
+  }
+
+  const subgraph = retrieveSubgraph(userText);
+  const prompt = wrapWithContext(userText, subgraph.formatted);
 
   return streamSSE(c, async (stream) => {
-    try {
-      const apiStream = client.messages.stream({
-        model: "claude-opus-4-7",
-        max_tokens: 64000,
-        system: SYSTEM_PROMPT,
-        messages,
+    if (subgraph.summary.edgeCount > 0 || subgraph.summary.nodeCount > 0) {
+      await stream.writeSSE({
+        data: JSON.stringify({ type: "context", ...subgraph.summary }),
       });
+    }
 
-      for await (const event of apiStream) {
-        if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
-          await stream.writeSSE({
-            data: JSON.stringify({ type: "text", delta: event.delta.text }),
-          });
+    try {
+      for await (const message of query({
+        prompt,
+        options: {
+          model: "claude-opus-4-7",
+          systemPrompt: SYSTEM_PROMPT,
+          permissionMode: "bypassPermissions",
+          mcpServers: { kg: kgServer },
+          allowedTools: [
+            ...KG_TOOL_NAMES,
+            "Bash",
+            "Read",
+            "Write",
+            "Edit",
+            "Glob",
+            "Grep",
+            "WebFetch",
+            "WebSearch",
+          ],
+          includePartialMessages: true,
+          ...(body.sessionId ? { resume: body.sessionId } : {}),
+        },
+      })) {
+        const m = message as Record<string, unknown> & { type: string };
+
+        switch (m.type) {
+          case "system": {
+            if (m.subtype === "init" && typeof m.session_id === "string") {
+              await stream.writeSSE({
+                data: JSON.stringify({ type: "session", id: m.session_id }),
+              });
+            }
+            break;
+          }
+          case "stream_event": {
+            // Token-by-token text. Tool_use input deltas are skipped here —
+            // the final assistant message carries complete tool_use blocks.
+            const ev = m.event as
+              | {
+                  type: string;
+                  delta?: { type: string; text?: string };
+                }
+              | undefined;
+            if (
+              ev?.type === "content_block_delta" &&
+              ev.delta?.type === "text_delta" &&
+              typeof ev.delta.text === "string"
+            ) {
+              await stream.writeSSE({
+                data: JSON.stringify({ type: "text", delta: ev.delta.text }),
+              });
+            }
+            break;
+          }
+          case "assistant": {
+            // Text already streamed via stream_event above. Forward tool_use
+            // blocks for the sidebar.
+            const inner = m.message as { content?: unknown[] } | undefined;
+            const content = inner?.content ?? [];
+            for (const blockRaw of content) {
+              const block = blockRaw as Record<string, unknown> & { type: string };
+              if (block.type === "tool_use") {
+                await stream.writeSSE({
+                  data: JSON.stringify({
+                    type: "tool_use",
+                    id: block.id,
+                    name: block.name,
+                    input: block.input,
+                  }),
+                });
+              }
+            }
+            break;
+          }
+          case "result": {
+            await stream.writeSSE({
+              data: JSON.stringify({
+                type: "done",
+                success: m.subtype === "success",
+                totalCostUsd: m.total_cost_usd,
+              }),
+            });
+            break;
+          }
         }
       }
-
-      const final = await apiStream.finalMessage();
-      await stream.writeSSE({
-        data: JSON.stringify({
-          type: "done",
-          stop_reason: final.stop_reason,
-          usage: final.usage,
-        }),
-      });
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Unknown error";
+      const msg = err instanceof Error ? err.message : "Unknown error";
       console.error("Chat error:", err);
-      await stream.writeSSE({ data: JSON.stringify({ type: "error", message }) });
+      await stream.writeSSE({ data: JSON.stringify({ type: "error", message: msg }) });
     }
   });
 });

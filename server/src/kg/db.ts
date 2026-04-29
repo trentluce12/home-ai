@@ -1,0 +1,390 @@
+import Database from "better-sqlite3";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
+import { mkdirSync } from "node:fs";
+import { customAlphabet } from "nanoid";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const DATA_DIR = resolve(__dirname, "../../../data");
+const DB_PATH = resolve(DATA_DIR, "kg.sqlite");
+
+mkdirSync(DATA_DIR, { recursive: true });
+
+export const db = new Database(DB_PATH);
+db.pragma("journal_mode = WAL");
+db.pragma("foreign_keys = ON");
+
+const SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS nodes (
+  id TEXT PRIMARY KEY,
+  type TEXT NOT NULL,
+  name TEXT NOT NULL,
+  props_json TEXT NOT NULL DEFAULT '{}',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(type);
+CREATE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name);
+
+CREATE TABLE IF NOT EXISTS edges (
+  id TEXT PRIMARY KEY,
+  from_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+  to_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+  type TEXT NOT NULL,
+  props_json TEXT NOT NULL DEFAULT '{}',
+  confidence REAL NOT NULL DEFAULT 1.0,
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_id);
+CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(to_id);
+CREATE INDEX IF NOT EXISTS idx_edges_type ON edges(type);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
+  id UNINDEXED,
+  name,
+  props_json
+);
+
+CREATE TRIGGER IF NOT EXISTS nodes_after_insert AFTER INSERT ON nodes BEGIN
+  INSERT INTO nodes_fts(id, name, props_json) VALUES (new.id, new.name, new.props_json);
+END;
+
+CREATE TRIGGER IF NOT EXISTS nodes_after_delete AFTER DELETE ON nodes BEGIN
+  DELETE FROM nodes_fts WHERE id = old.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS nodes_after_update AFTER UPDATE ON nodes BEGIN
+  DELETE FROM nodes_fts WHERE id = old.id;
+  INSERT INTO nodes_fts(id, name, props_json) VALUES (new.id, new.name, new.props_json);
+END;
+
+CREATE TABLE IF NOT EXISTS provenance (
+  fact_id TEXT NOT NULL,
+  fact_kind TEXT NOT NULL CHECK(fact_kind IN ('node', 'edge')),
+  source TEXT NOT NULL,
+  source_ref TEXT,
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_provenance_fact_id ON provenance(fact_id);
+`;
+
+db.exec(SCHEMA_SQL);
+
+const alphabet = "0123456789abcdefghijklmnopqrstuvwxyz";
+const nanoid = customAlphabet(alphabet, 12);
+export const newNodeId = () => `node_${nanoid()}`;
+export const newEdgeId = () => `edge_${nanoid()}`;
+
+export const NODE_TYPES = [
+  "Person",
+  "Place",
+  "Device",
+  "Project",
+  "Task",
+  "Event",
+  "Preference",
+  "Document",
+  "Topic",
+  "Organization",
+  "Pet",
+] as const;
+
+export const EDGE_TYPES = [
+  "KNOWS",
+  "LIVES_WITH",
+  "WORKS_AT",
+  "OWNS",
+  "LOCATED_IN",
+  "PART_OF",
+  "RELATES_TO",
+  "SCHEDULED_FOR",
+  "ASSIGNED_TO",
+  "PREFERS",
+  "DEPENDS_ON",
+  "MENTIONED_IN",
+] as const;
+
+export interface Node {
+  id: string;
+  type: string;
+  name: string;
+  props: Record<string, unknown>;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface Edge {
+  id: string;
+  fromId: string;
+  toId: string;
+  type: string;
+  props: Record<string, unknown>;
+  confidence: number;
+  createdAt: number;
+}
+
+interface NodeRow {
+  id: string;
+  type: string;
+  name: string;
+  props_json: string;
+  created_at: number;
+  updated_at: number;
+}
+
+interface EdgeRow {
+  id: string;
+  from_id: string;
+  to_id: string;
+  type: string;
+  props_json: string;
+  confidence: number;
+  created_at: number;
+}
+
+function nodeFromRow(row: NodeRow): Node {
+  return {
+    id: row.id,
+    type: row.type,
+    name: row.name,
+    props: JSON.parse(row.props_json),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function edgeFromRow(row: EdgeRow): Edge {
+  return {
+    id: row.id,
+    fromId: row.from_id,
+    toId: row.to_id,
+    type: row.type,
+    props: JSON.parse(row.props_json),
+    confidence: row.confidence,
+    createdAt: row.created_at,
+  };
+}
+
+export function addNode(input: {
+  type: string;
+  name: string;
+  props?: Record<string, unknown>;
+}): Node {
+  const id = newNodeId();
+  const now = Date.now();
+  const props_json = JSON.stringify(input.props ?? {});
+
+  db.prepare(
+    `INSERT INTO nodes (id, type, name, props_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(id, input.type, input.name, props_json, now, now);
+
+  return {
+    id,
+    type: input.type,
+    name: input.name,
+    props: input.props ?? {},
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function addEdge(input: {
+  fromId: string;
+  toId: string;
+  type: string;
+  props?: Record<string, unknown>;
+  confidence?: number;
+}): Edge {
+  const id = newEdgeId();
+  const now = Date.now();
+  const props_json = JSON.stringify(input.props ?? {});
+  const confidence = input.confidence ?? 1.0;
+
+  db.prepare(
+    `INSERT INTO edges (id, from_id, to_id, type, props_json, confidence, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(id, input.fromId, input.toId, input.type, props_json, confidence, now);
+
+  return {
+    id,
+    fromId: input.fromId,
+    toId: input.toId,
+    type: input.type,
+    props: input.props ?? {},
+    confidence,
+    createdAt: now,
+  };
+}
+
+export function getNode(id: string): Node | null {
+  const row = db.prepare(`SELECT * FROM nodes WHERE id = ?`).get(id) as NodeRow | undefined;
+  return row ? nodeFromRow(row) : null;
+}
+
+export function findNodeByName(name: string, type?: string): Node | null {
+  const row = (
+    type
+      ? db.prepare(`SELECT * FROM nodes WHERE name = ? AND type = ? LIMIT 1`).get(name, type)
+      : db.prepare(`SELECT * FROM nodes WHERE name = ? LIMIT 1`).get(name)
+  ) as NodeRow | undefined;
+  return row ? nodeFromRow(row) : null;
+}
+
+export function search(opts: {
+  query: string;
+  types?: string[];
+  limit?: number;
+}): Node[] {
+  const limit = opts.limit ?? 10;
+  const ftsQuery = opts.query
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((tok) => `${tok.replace(/["*]/g, "")}*`)
+    .join(" ");
+
+  if (!ftsQuery) return [];
+
+  let sql = `
+    SELECT n.* FROM nodes_fts f
+    JOIN nodes n ON n.id = f.id
+    WHERE nodes_fts MATCH ?
+  `;
+  const params: unknown[] = [ftsQuery];
+
+  if (opts.types && opts.types.length > 0) {
+    sql += ` AND n.type IN (${opts.types.map(() => "?").join(",")})`;
+    params.push(...opts.types);
+  }
+
+  sql += ` LIMIT ?`;
+  params.push(limit);
+
+  const rows = db.prepare(sql).all(...params) as NodeRow[];
+  return rows.map(nodeFromRow);
+}
+
+export function neighbors(opts: {
+  nodeId: string;
+  edgeTypes?: string[];
+  direction?: "in" | "out" | "both";
+}): { edge: Edge; node: Node }[] {
+  const direction = opts.direction ?? "both";
+  const conditions: string[] = [];
+  const params: unknown[] = [];
+
+  if (direction === "out" || direction === "both") {
+    conditions.push("from_id = ?");
+    params.push(opts.nodeId);
+  }
+  if (direction === "in" || direction === "both") {
+    conditions.push("to_id = ?");
+    params.push(opts.nodeId);
+  }
+
+  let sql = `SELECT * FROM edges WHERE (${conditions.join(" OR ")})`;
+
+  if (opts.edgeTypes && opts.edgeTypes.length > 0) {
+    sql += ` AND type IN (${opts.edgeTypes.map(() => "?").join(",")})`;
+    params.push(...opts.edgeTypes);
+  }
+
+  const edgeRows = db.prepare(sql).all(...params) as EdgeRow[];
+  const result: { edge: Edge; node: Node }[] = [];
+  const nodeStmt = db.prepare(`SELECT * FROM nodes WHERE id = ?`);
+
+  for (const row of edgeRows) {
+    const otherId = row.from_id === opts.nodeId ? row.to_id : row.from_id;
+    const nodeRow = nodeStmt.get(otherId) as NodeRow | undefined;
+    if (nodeRow) {
+      result.push({ edge: edgeFromRow(row), node: nodeFromRow(nodeRow) });
+    }
+  }
+  return result;
+}
+
+function findOrCreateNode(spec: {
+  nameOrId: string;
+  type?: string;
+}): { node: Node; created: boolean } {
+  if (spec.nameOrId.startsWith("node_")) {
+    const found = getNode(spec.nameOrId);
+    if (found) return { node: found, created: false };
+  }
+  const found = findNodeByName(spec.nameOrId, spec.type);
+  if (found) return { node: found, created: false };
+  if (!spec.type) {
+    throw new Error(
+      `Cannot create node "${spec.nameOrId}" without a type — provide a type or pass an existing node ID.`,
+    );
+  }
+  return { node: addNode({ type: spec.type, name: spec.nameOrId }), created: true };
+}
+
+export function link(input: {
+  a: { nameOrId: string; type?: string };
+  b: { nameOrId: string; type?: string };
+  edgeType: string;
+  edgeProps?: Record<string, unknown>;
+  confidence?: number;
+}): {
+  a: Node;
+  b: Node;
+  edge: Edge;
+  created: { aCreated: boolean; bCreated: boolean };
+} {
+  const aRes = findOrCreateNode(input.a);
+  const bRes = findOrCreateNode(input.b);
+  const edge = addEdge({
+    fromId: aRes.node.id,
+    toId: bRes.node.id,
+    type: input.edgeType,
+    props: input.edgeProps,
+    confidence: input.confidence,
+  });
+  return {
+    a: aRes.node,
+    b: bRes.node,
+    edge,
+    created: { aCreated: aRes.created, bCreated: bRes.created },
+  };
+}
+
+export function updateNode(input: {
+  id: string;
+  name?: string;
+  props?: Record<string, unknown>;
+}): Node {
+  const existing = getNode(input.id);
+  if (!existing) throw new Error(`Node ${input.id} not found`);
+  const newName = input.name ?? existing.name;
+  const newProps = input.props ?? existing.props;
+  const now = Date.now();
+  db.prepare(
+    `UPDATE nodes SET name = ?, props_json = ?, updated_at = ? WHERE id = ?`,
+  ).run(newName, JSON.stringify(newProps), now, input.id);
+  return { ...existing, name: newName, props: newProps, updatedAt: now };
+}
+
+export function recentNodes(limit: number = 10): Node[] {
+  const rows = db
+    .prepare(`SELECT * FROM nodes ORDER BY updated_at DESC LIMIT ?`)
+    .all(limit) as NodeRow[];
+  return rows.map(nodeFromRow);
+}
+
+export function kgStats(): {
+  nodeCount: number;
+  edgeCount: number;
+  nodeCountsByType: Record<string, number>;
+} {
+  const nodeCount = (db.prepare(`SELECT COUNT(*) as c FROM nodes`).get() as { c: number }).c;
+  const edgeCount = (db.prepare(`SELECT COUNT(*) as c FROM edges`).get() as { c: number }).c;
+  const typeRows = db
+    .prepare(`SELECT type, COUNT(*) as c FROM nodes GROUP BY type`)
+    .all() as { type: string; c: number }[];
+  const nodeCountsByType: Record<string, number> = {};
+  for (const r of typeRows) nodeCountsByType[r.type] = r.c;
+  return { nodeCount, edgeCount, nodeCountsByType };
+}
