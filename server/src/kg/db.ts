@@ -378,6 +378,85 @@ export function updateNode(input: {
   return { ...existing, name: newName, props: newProps, updatedAt: now };
 }
 
+export function deleteNode(id: string): { deleted: boolean; edgesRemoved: number } {
+  const node = getNode(id);
+  if (!node) return { deleted: false, edgesRemoved: 0 };
+
+  const edgeRows = db
+    .prepare(`SELECT id FROM edges WHERE from_id = ? OR to_id = ?`)
+    .all(id, id) as { id: string }[];
+  const edgeIds = edgeRows.map((r) => r.id);
+
+  const tx = db.transaction(() => {
+    if (edgeIds.length > 0) {
+      const placeholders = edgeIds.map(() => "?").join(",");
+      db.prepare(
+        `DELETE FROM provenance WHERE fact_kind = 'edge' AND fact_id IN (${placeholders})`,
+      ).run(...edgeIds);
+    }
+    db.prepare(`DELETE FROM provenance WHERE fact_kind = 'node' AND fact_id = ?`).run(id);
+    db.prepare(`DELETE FROM nodes WHERE id = ?`).run(id);
+  });
+  tx();
+
+  return { deleted: true, edgesRemoved: edgeIds.length };
+}
+
+export function findNodesByName(name: string): Node[] {
+  const rows = db.prepare(`SELECT * FROM nodes WHERE name = ?`).all(name) as NodeRow[];
+  return rows.map(nodeFromRow);
+}
+
+export interface KgExport {
+  exportedAt: number;
+  nodes: Node[];
+  edges: Edge[];
+  provenance: { factId: string; factKind: "node" | "edge"; source: string; sourceRef: string | null; createdAt: number }[];
+}
+
+export function exportKg(): KgExport {
+  const nodeRows = db.prepare(`SELECT * FROM nodes`).all() as NodeRow[];
+  const edgeRows = db.prepare(`SELECT * FROM edges`).all() as EdgeRow[];
+  const provRows = db
+    .prepare(`SELECT fact_id, fact_kind, source, source_ref, created_at FROM provenance`)
+    .all() as {
+    fact_id: string;
+    fact_kind: "node" | "edge";
+    source: string;
+    source_ref: string | null;
+    created_at: number;
+  }[];
+  return {
+    exportedAt: Date.now(),
+    nodes: nodeRows.map(nodeFromRow),
+    edges: edgeRows.map(edgeFromRow),
+    provenance: provRows.map((p) => ({
+      factId: p.fact_id,
+      factKind: p.fact_kind,
+      source: p.source,
+      sourceRef: p.source_ref,
+      createdAt: p.created_at,
+    })),
+  };
+}
+
+function dotEscape(s: string): string {
+  return s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+export function exportKgDot(): string {
+  const data = exportKg();
+  const lines: string[] = ['digraph kg {', '  rankdir=LR;', '  node [shape=box, style=rounded];'];
+  for (const n of data.nodes) {
+    lines.push(`  "${n.id}" [label="${dotEscape(n.name)}\\n(${n.type})"];`);
+  }
+  for (const e of data.edges) {
+    lines.push(`  "${e.fromId}" -> "${e.toId}" [label="${dotEscape(e.type)}"];`);
+  }
+  lines.push("}");
+  return lines.join("\n");
+}
+
 export function recentNodes(limit: number = 10): Node[] {
   const rows = db
     .prepare(`SELECT * FROM nodes ORDER BY updated_at DESC LIMIT ?`)

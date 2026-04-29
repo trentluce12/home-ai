@@ -5,13 +5,20 @@ import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { streamSSE } from "hono/streaming";
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import {
+  query,
+  listSessions,
+  getSessionMessages,
+  deleteSession,
+} from "@anthropic-ai/claude-agent-sdk";
 import { kgServer, KG_TOOL_NAMES } from "./kg/tools.js";
 import { retrieveSubgraph } from "./kg/retrieve.js";
+import * as kg from "./kg/db.js";
 
 // Load .env from the project root (one level above server/)
 const __dirname = dirname(fileURLToPath(import.meta.url));
-config({ path: resolve(__dirname, "../../.env") });
+const PROJECT_DIR = resolve(__dirname, "../..");
+config({ path: resolve(PROJECT_DIR, ".env") });
 
 const app = new Hono();
 app.use("*", cors({ origin: "http://localhost:5173" }));
@@ -79,6 +86,7 @@ app.post("/chat", async (c) => {
         prompt,
         options: {
           model: "claude-opus-4-7",
+          cwd: PROJECT_DIR,
           systemPrompt: SYSTEM_PROMPT,
           permissionMode: "bypassPermissions",
           mcpServers: { kg: kgServer },
@@ -183,6 +191,104 @@ app.post("/chat", async (c) => {
       console.error("Chat error:", err);
       await stream.writeSSE({ data: JSON.stringify({ type: "error", message: msg }) });
     }
+  });
+});
+
+// ───────── Sessions ─────────
+
+const CONTEXT_PREFIX = /^<context>[\s\S]*?<\/context>\n\n/;
+const stripContext = (s: string): string => s.replace(CONTEXT_PREFIX, "");
+
+function extractText(message: unknown): string {
+  if (!message || typeof message !== "object") return "";
+  const m = message as { content?: unknown };
+  const content = m.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter(
+      (b): b is { type: "text"; text: string } =>
+        b !== null &&
+        typeof b === "object" &&
+        (b as { type?: unknown }).type === "text" &&
+        typeof (b as { text?: unknown }).text === "string",
+    )
+    .map((b) => b.text)
+    .join("");
+}
+
+app.get("/sessions", async (c) => {
+  const sessions = await listSessions({ dir: PROJECT_DIR, includeWorktrees: false });
+  return c.json(
+    sessions
+      .map((s) => ({
+        id: s.sessionId,
+        title: s.customTitle ?? (s.firstPrompt ? stripContext(s.firstPrompt) : s.summary),
+        lastModified: s.lastModified,
+      }))
+      .sort((a, b) => b.lastModified - a.lastModified),
+  );
+});
+
+app.get("/sessions/:id/history", async (c) => {
+  const id = c.req.param("id");
+  const messages = await getSessionMessages(id, { dir: PROJECT_DIR });
+  const turns: { role: "user" | "assistant"; content: string }[] = [];
+  for (const msg of messages) {
+    if (msg.type !== "user" && msg.type !== "assistant") continue;
+    const text = extractText(msg.message);
+    if (!text) continue;
+    turns.push({
+      role: msg.type,
+      content: msg.type === "user" ? stripContext(text) : text,
+    });
+  }
+  return c.json(turns);
+});
+
+app.delete("/sessions/:id", async (c) => {
+  const id = c.req.param("id");
+  await deleteSession(id, { dir: PROJECT_DIR });
+  return c.json({ ok: true });
+});
+
+// ───────── KG (slash commands) ─────────
+
+app.get("/kg/recent", (c) => {
+  const limit = Number(c.req.query("limit") ?? 20);
+  return c.json(kg.recentNodes(Number.isFinite(limit) ? limit : 20));
+});
+
+app.get("/kg/stats", (c) => c.json(kg.kgStats()));
+
+app.get("/kg/by-name/:name", (c) => {
+  const name = c.req.param("name");
+  const nodes = kg.findNodesByName(name);
+  const withNeighbors = nodes.map((node) => ({
+    node,
+    neighbors: kg.neighbors({ nodeId: node.id }),
+  }));
+  return c.json(withNeighbors);
+});
+
+app.delete("/kg/node/:id", (c) => {
+  const id = c.req.param("id");
+  const result = kg.deleteNode(id);
+  if (!result.deleted) return c.json({ error: "Node not found" }, 404);
+  return c.json(result);
+});
+
+app.get("/kg/export", (c) => {
+  const format = c.req.query("format") ?? "json";
+  if (format === "dot") {
+    return c.body(kg.exportKgDot(), 200, {
+      "Content-Type": "text/vnd.graphviz",
+      "Content-Disposition": `attachment; filename="kg-${Date.now()}.dot"`,
+    });
+  }
+  return c.body(JSON.stringify(kg.exportKg(), null, 2), 200, {
+    "Content-Type": "application/json",
+    "Content-Disposition": `attachment; filename="kg-${Date.now()}.json"`,
   });
 });
 

@@ -47,8 +47,25 @@ Verified: chat works end-to-end with streaming.
 
 ## M4 — quality of life
 
-- [ ] Graph visualization panel (`react-force-graph` or `sigma.js`)
-- [ ] In-chat slash commands (`/recent`, `/forget`, `/stats`)
-- [ ] Backups / export (JSON, graphviz)
-- [ ] Bulk import (Obsidian markdown, JSON)
-- [ ] Conversation persistence (per-session; resume on refresh)
+Split into three phases; each ships independently.
+
+### Phase 1 — sessions, dashboard, markdown (shipped ✓)
+
+- [x] Multi-session persistence: left sidebar lists past chats (via Agent SDK `listSessions`), click to load history (`getSessionMessages`), "new chat" button starts fresh, hover→delete
+- [x] Empty-state dashboard (replaces the slash-command pattern): when there are no messages in view, the chat area shows live KG stats + recent nodes + a forget input + export buttons. Disappears once chatting starts; reappears via "new chat".
+- [x] KG endpoints added (`/kg/recent`, `/kg/stats`, `/kg/by-name`, `/kg/node/:id`, `/kg/export?format=json|dot`) — same surface, now consumed by the dashboard.
+- [x] Backups / export — JSON (full snapshot minus embeddings) + Graphviz `.dot`, both as downloadable files via dashboard buttons.
+- [x] Forget flow shows the node + every edge that would die before confirming, then deletes with provenance cleanup in a transaction.
+- [x] Markdown rendering on assistant messages via `react-markdown` + `remark-gfm` + Tailwind typography (`prose-invert`); inline streaming cursor dropped in favor of the existing header indicator.
+- [x] Layout reshuffled to 3 columns (chats / chat / memory) on `lg+`; smaller breakpoints hide both sidebars.
+- [x] Smoke tests: dashboard loads with seeded counts, forget flow works, markdown renders, sessions sidebar persists across refresh, SessionStore adapter writes show up in `data/kg.sqlite`.
+
+### Phase 2 — graph visualization (locked, not started)
+
+- [ ] sigma.js panel (chosen for long-term scaling vs react-force-graph) — toggleable view of the KG, live-updates on new facts
+- [ ] `GET /kg/graph` endpoint returning sigma-friendly node/edge shapes
+
+### Phase 3 — bulk import (deferred)
+
+- [ ] JSON import (accepts the export shape)
+- [ ] Obsidian markdown ingestion (likely via the agent itself in a one-off flow rather than a structured importer)

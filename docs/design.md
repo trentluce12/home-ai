@@ -12,6 +12,35 @@ A personal AI: streaming chat UI on top of the Anthropic API. Knowledge graph co
 
 Newest first. Append entries; don't edit history.
 
+### 2026-04-28 · M4 phase 1 — sessions, slash commands, markdown rendering
+
+Three loosely-related QoL items shipped together because they share UI surface (sidebar layout, modal infra, message rendering).
+
+**Multi-session persistence.** The Agent SDK already persists every session as JSONL under `~/.claude/projects/<encoded-project-dir>/<session-id>.jsonl`. We just hadn't been using it. Three new endpoints expose the SDK's session primitives — `listSessions({ dir: PROJECT_DIR })`, `getSessionMessages(id, { dir })`, `deleteSession(id, { dir })` — and the frontend stitches them together: left sidebar lists past chats, clicking loads the history into `messages` state, "new chat" clears the slate.
+
+History replay needed one wrinkle: the saved user messages contain the M2 `<context>...</context>` wrap. We strip that on the way out (`stripContext`) so the user sees what they actually typed, not the injection. `firstPrompt` from `SDKSessionInfo` gets the same treatment for the chat title.
+
+**Why multi-session over single thread.** Considered a single continuous thread (simpler) but went with multi because the user wanted to keep distinct conversations distinct (planning a trip, debugging code, etc.). Cheap to add, no real downside.
+
+**Empty-state dashboard (pivoted away from slash commands).** Original M4 design had `/recent`, `/stats`, `/forget <name>`, `/export` typed into the chat input → opening a modal. Implemented and typechecking, then pivoted on review: the user pointed out that Claude Code's pre-session view is a more discoverable pattern. Replaced the modal with an `EmptyDashboard` component that occupies the chat area whenever `messages.length === 0`:
+
+- **stats + recent** are auto-loaded on mount (no command needed); the section refreshes via a `refreshKey` bump after any forget or chat completion.
+- **forget** is a fill-in input + button: type a name → Find → inline confirmation panel listing every match plus its neighbors → per-match Forget button. Same deletion path (provenance cleanup in a transaction) as the modal had.
+- **export** is two buttons (JSON / Graphviz `.dot`); embeddings excluded.
+- The dashboard disappears once the conversation starts; clicking "new chat" in the sessions sidebar brings it back.
+
+The `SlashCommandModal` component, parser, and slash-routing in `send()` were deleted — no command parsing in the input layer at all now. Typing `/anything` just sends to chat. The KG endpoints (`/kg/recent`, `/kg/stats`, `/kg/by-name`, `/kg/node/:id`, `/kg/export`) didn't change; only the consumer did.
+
+**Why the pivot.** Discoverability. A blank "what's on your mind?" screen tells the user nothing about what `home-ai` actually remembers; the dashboard makes the state of the system part of the empty surface. The slash-command pattern works for power users who already know the commands, but a personal AI's first-time-of-the-day experience benefits from showing rather than gating.
+
+**Markdown rendering.** Assistant messages now go through `react-markdown` + `remark-gfm` with the Tailwind typography plugin's `prose-invert` styling (with overrides for our color palette). The inline streaming cursor was dropped — the header "thinking…" indicator already covers the streaming feedback role, and reconciling a trailing cursor with a markdown-rendered tree is a fight for marginal value.
+
+**Layout.** Three columns at `lg+`: sessions (288px) / chat (flex) / memory (288px). Smaller breakpoints hide both sidebars and show only the chat. Mobile UX still isn't a focus.
+
+**Component split.** App.tsx had been fine as one file through M3 but was about to balloon. Pulled `MessageBubble`, `MemoryPanel`, `SessionList`, and `SlashCommandModal` into `web/src/components/`, plus a small `web/src/lib/api.ts` for fetch helpers and shared types. Tradeoff is a few more files; benefit is App.tsx stays an orchestrator.
+
+**Deferred to phase 2.** Graph visualization (sigma.js, locked in). Phase 3 — bulk import — is on hold until there's actually a corpus worth importing.
+
 ### 2026-04-28 · M3 — Voyage embeddings + RRF hybrid retrieval + provenance
 
 **Storage.** New `node_embeddings(node_id PK FK, model, vector BLOB, dim, updated_at)` table. Vectors packed as Float32Array bytes. Decode copies into a fresh array to avoid alias-with-buffer pitfalls across rows. FK cascade so deleting a node removes its embedding.
