@@ -16,7 +16,7 @@ When making non-trivial decisions, append an entry to `docs/design.md`. When clo
 Lifecycle: write a task in `tasks/planned/`, move to `tasks/in-progress/` when picking it up, delete on completion. Slash commands handle the file ops:
 
 - `/task-new <title>` — scaffold a new task in `tasks/planned/`
-- `/task-start <slug>` — move planned → in-progress
+- `/task-start <slug>` — move planned → in-progress and spawn the `story-implementer` subagent (implements, runs typecheck, smoke-tests if headless, deletes the task file, reports back)
 - `/task-done <slug>` — delete the in-progress file + update `docs/milestones.md` / `docs/design.md` if the task closed a phase or made a non-trivial decision
 - `/tasks` — list current state (planned + in-progress)
 
@@ -48,7 +48,6 @@ Done = deleted: git history + `docs/` keep the record, no `tasks/done/` graveyar
 
 ## Don't add until needed
 
-- Subagents (`.claude/agents/`)
 - Skills (`.claude/skills/`)
 - Hooks
 - Prompt caching, adaptive thinking, conversation persistence
