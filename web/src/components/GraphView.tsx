@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { X } from "lucide-react";
+import { Search, X } from "lucide-react";
 import Graph from "graphology";
 import Sigma from "sigma";
 import FA2Layout from "graphology-layout-forceatlas2/worker";
 import forceAtlas2 from "graphology-layout-forceatlas2";
 import circular from "graphology-layout/circular";
-import { api, type GraphData, type NodeDetail } from "../lib/api";
+import { api, type GraphData, type NodeDetail, type NodeLayoutEntry } from "../lib/api";
 
 const TYPE_COLORS: Record<string, string> = {
   Person: "#a1a1aa",
@@ -24,6 +24,8 @@ const TYPE_COLORS: Record<string, string> = {
 const DEFAULT_COLOR = "#9ca3af";
 const colorFor = (type: string) => TYPE_COLORS[type] ?? DEFAULT_COLOR;
 
+const FA2_DURATION_MS = 4000;
+
 interface Props {
   open: boolean;
   onClose: () => void;
@@ -34,21 +36,25 @@ export function GraphView({ open, onClose, refreshKey }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const sigmaRef = useRef<Sigma | null>(null);
   const layoutRef = useRef<FA2Layout | null>(null);
+  const graphRef = useRef<Graph | null>(null);
 
   const [data, setData] = useState<GraphData | null>(null);
+  const [layout, setLayout] = useState<NodeLayoutEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedDetail, setSelectedDetail] = useState<NodeDetail | null>(null);
   const [hidden, setHidden] = useState<Set<string>>(new Set());
+  const [searchQuery, setSearchQuery] = useState("");
 
-  // Fetch graph on open + on refresh
+  // Fetch graph + saved layout on open + on refresh
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
     setError(null);
-    api
-      .graph()
-      .then((d) => {
-        if (!cancelled) setData(d);
+    Promise.all([api.graph(), api.getLayout().catch(() => [] as NodeLayoutEntry[])])
+      .then(([d, l]) => {
+        if (cancelled) return;
+        setData(d);
+        setLayout(l);
       })
       .catch((err) => {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err));
@@ -65,14 +71,17 @@ export function GraphView({ open, onClose, refreshKey }: Props) {
 
     const graph = new Graph({ multi: false });
     const visibleIds = new Set<string>();
+    const layoutMap = new Map(layout?.map((p) => [p.nodeId, p]) ?? []);
 
     for (const n of data.nodes) {
       if (hidden.has(n.type)) continue;
+      const saved = layoutMap.get(n.id);
       graph.addNode(n.id, {
         label: n.name,
         size: 6,
         color: colorFor(n.type),
         nodeType: n.type,
+        ...(saved ? { x: saved.x, y: saved.y } : {}),
       });
       visibleIds.add(n.id);
     }
@@ -96,7 +105,39 @@ export function GraphView({ open, onClose, refreshKey }: Props) {
       graph.setNodeAttribute(id, "size", 4 + Math.min(degree * 1.4, 14));
     });
 
-    circular.assign(graph);
+    // Seed coords for any node that didn't have a saved layout, so FA2 has
+    // something non-degenerate to work from.
+    const newNodes: string[] = [];
+    graph.forEachNode((id, attr) => {
+      if (typeof attr.x !== "number" || typeof attr.y !== "number") {
+        newNodes.push(id);
+      }
+    });
+    if (newNodes.length === graph.order) {
+      // No saved layout at all — fresh circular seed.
+      circular.assign(graph);
+    } else if (newNodes.length > 0) {
+      // Seed unplaced nodes near the centroid of placed ones.
+      let cx = 0;
+      let cy = 0;
+      let placed = 0;
+      graph.forEachNode((_id, attr) => {
+        if (typeof attr.x === "number" && typeof attr.y === "number") {
+          cx += attr.x;
+          cy += attr.y;
+          placed++;
+        }
+      });
+      if (placed > 0) {
+        cx /= placed;
+        cy /= placed;
+      }
+      for (let i = 0; i < newNodes.length; i++) {
+        const angle = (i / newNodes.length) * Math.PI * 2;
+        graph.setNodeAttribute(newNodes[i]!, "x", cx + Math.cos(angle) * 5);
+        graph.setNodeAttribute(newNodes[i]!, "y", cy + Math.sin(angle) * 5);
+      }
+    }
 
     const sigma = new Sigma(graph, containerRef.current, {
       labelColor: { color: "#a1a1aa" },
@@ -110,6 +151,7 @@ export function GraphView({ open, onClose, refreshKey }: Props) {
       edgeLabelSize: 9,
     });
     sigmaRef.current = sigma;
+    graphRef.current = graph;
 
     sigma.on("clickNode", ({ node }) => {
       api
@@ -144,22 +186,40 @@ export function GraphView({ open, onClose, refreshKey }: Props) {
         : { ...attr, hidden: true };
     });
 
+    // If we restored a saved layout, run FA2 only weakly (or not at all) so
+    // existing positions stay put. Fresh layouts get the original strong run.
+    const hasSavedLayout = layoutMap.size > 0;
     const settings = forceAtlas2.inferSettings(graph);
-    const layout = new FA2Layout(graph, {
-      settings: { ...settings, scalingRatio: 10, gravity: 1, slowDown: 4 },
-    });
-    layoutRef.current = layout;
-    layout.start();
-    const stopTimer = setTimeout(() => layout.stop(), 4000);
+    const fa2Settings = hasSavedLayout
+      ? { ...settings, scalingRatio: 1, gravity: 0.1, slowDown: 20 }
+      : { ...settings, scalingRatio: 10, gravity: 1, slowDown: 4 };
+    const layoutWorker = new FA2Layout(graph, { settings: fa2Settings });
+    layoutRef.current = layoutWorker;
+    layoutWorker.start();
+
+    const stopTimer = setTimeout(() => {
+      layoutWorker.stop();
+      // Snapshot positions for next open.
+      const positions: NodeLayoutEntry[] = [];
+      graph.forEachNode((id, attr) => {
+        if (typeof attr.x === "number" && typeof attr.y === "number") {
+          positions.push({ nodeId: id, x: attr.x, y: attr.y });
+        }
+      });
+      if (positions.length > 0) {
+        api.saveLayout(positions).catch(() => undefined);
+      }
+    }, FA2_DURATION_MS);
 
     return () => {
       clearTimeout(stopTimer);
-      layout.kill();
+      layoutWorker.kill();
       sigma.kill();
       sigmaRef.current = null;
       layoutRef.current = null;
+      graphRef.current = null;
     };
-  }, [open, data, hidden]);
+  }, [open, data, layout, hidden]);
 
   // Escape to close
   useEffect(() => {
@@ -176,13 +236,34 @@ export function GraphView({ open, onClose, refreshKey }: Props) {
     return Array.from(new Set(data.nodes.map((n) => n.type))).sort();
   }, [data]);
 
+  const searchMatches = useMemo(() => {
+    if (!data || !searchQuery.trim()) return [];
+    const q = searchQuery.trim().toLowerCase();
+    return data.nodes
+      .filter((n) => n.name.toLowerCase().includes(q) && !hidden.has(n.type))
+      .slice(0, 8);
+  }, [data, searchQuery, hidden]);
+
+  function focusNode(id: string) {
+    const sigma = sigmaRef.current;
+    const graph = graphRef.current;
+    if (!sigma || !graph || !graph.hasNode(id)) return;
+    const x = graph.getNodeAttribute(id, "x") as number | undefined;
+    const y = graph.getNodeAttribute(id, "y") as number | undefined;
+    if (typeof x !== "number" || typeof y !== "number") return;
+    const camera = sigma.getCamera();
+    camera.animate({ x, y, ratio: 0.3 }, { duration: 400 });
+    api.nodeDetail(id).then(setSelectedDetail).catch(() => undefined);
+    setSearchQuery("");
+  }
+
   if (!open) return null;
 
   return (
     <div className="fixed inset-0 z-50 bg-zinc-950 animate-fade-in">
       <div ref={containerRef} className="absolute inset-0" />
 
-      <header className="absolute top-0 left-0 right-0 z-10 flex items-center justify-between border-b border-zinc-900/80 bg-zinc-950/80 px-6 py-3 backdrop-blur">
+      <header className="absolute top-0 left-0 right-0 z-10 flex items-center justify-between gap-4 border-b border-zinc-900/80 bg-zinc-950/80 px-6 py-3 backdrop-blur">
         <div className="flex items-baseline gap-2 font-mono text-sm">
           <span className="text-zinc-200">memory graph</span>
           {data && (
@@ -191,6 +272,65 @@ export function GraphView({ open, onClose, refreshKey }: Props) {
             </span>
           )}
         </div>
+
+        {data && data.nodes.length > 0 && (
+          <div className="relative max-w-xs flex-1">
+            <div className="flex items-center gap-2 rounded-full border border-zinc-800 bg-zinc-900/60 px-3 py-1.5 transition focus-within:border-zinc-700 focus-within:bg-zinc-900">
+              <Search className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="search nodes…"
+                className="min-w-0 flex-1 bg-transparent text-xs text-zinc-100 placeholder:text-zinc-600 focus:outline-none"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && searchMatches[0]) {
+                    e.preventDefault();
+                    focusNode(searchMatches[0].id);
+                  } else if (e.key === "Escape") {
+                    setSearchQuery("");
+                  }
+                }}
+              />
+              {searchQuery && (
+                <button
+                  onClick={() => setSearchQuery("")}
+                  aria-label="clear search"
+                  className="text-zinc-500 transition hover:text-zinc-200"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              )}
+            </div>
+            {searchQuery && searchMatches.length > 0 && (
+              <ul className="absolute left-0 right-0 top-full mt-1 max-h-72 overflow-y-auto rounded-md border border-zinc-800 bg-zinc-950/95 py-1 shadow-2xl backdrop-blur">
+                {searchMatches.map((n) => (
+                  <li key={n.id}>
+                    <button
+                      onClick={() => focusNode(n.id)}
+                      className="flex w-full items-center gap-2 px-3 py-1.5 text-left transition hover:bg-zinc-900"
+                    >
+                      <span
+                        className="h-2 w-2 shrink-0 rounded-full"
+                        style={{ backgroundColor: colorFor(n.type) }}
+                      />
+                      <span className="flex-1 truncate text-xs text-zinc-200">
+                        {n.name}
+                      </span>
+                      <span className="text-[10px] text-zinc-500">{n.type}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {searchQuery && searchMatches.length === 0 && (
+              <p className="absolute left-0 right-0 top-full mt-1 rounded-md border border-zinc-800 bg-zinc-950/95 px-3 py-2 text-xs text-zinc-500 shadow-2xl backdrop-blur">
+                no matches.
+              </p>
+            )}
+          </div>
+        )}
+
         <button
           onClick={onClose}
           aria-label="close graph"

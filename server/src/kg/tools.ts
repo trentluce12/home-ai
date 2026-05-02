@@ -1,7 +1,7 @@
 import { tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import * as kg from "./db.js";
-import { embedNodes } from "../embeddings/index.js";
+import { embedNode, embedNodes } from "../embeddings/index.js";
 
 async function recordFact(input: {
   a: { nameOrId: string; type?: string };
@@ -172,7 +172,16 @@ const updateNodeTool = tool(
     props: z.record(z.string(), z.unknown()).optional(),
   },
   async (args) => {
+    const before = kg.getNode(args.id);
     const node = kg.updateNode(args);
+    const nameChanged = before !== null && before.name !== node.name;
+    if (nameChanged) {
+      try {
+        await embedNode(node);
+      } catch (err) {
+        console.warn(`Re-embedding failed for ${node.id} after rename:`, err);
+      }
+    }
     return {
       content: [{ type: "text", text: `Updated ${node.type} "${node.name}" (id: ${node.id})` }],
     };

@@ -10,10 +10,12 @@ import {
   listSessions,
   getSessionMessages,
   deleteSession,
+  renameSession,
 } from "@anthropic-ai/claude-agent-sdk";
 import { kgServer, KG_TOOL_NAMES } from "./kg/tools.js";
 import { retrieveSubgraph } from "./kg/retrieve.js";
 import * as kg from "./kg/db.js";
+import { embedNodes } from "./embeddings/index.js";
 import { sqliteSessionStore } from "./sessions/store.js";
 import { cleanupSessions } from "./sessions/cleanup.js";
 import { db } from "./kg/db.js";
@@ -55,7 +57,12 @@ When in doubt, prefer \`record_user_fact\`. Don't ask permission. Don't over-rec
 OTHER TOOLS:
 - File system (Read, Write, Edit, Glob, Grep) and Bash are available for tasks involving files or shell commands.
 - Web tools (WebFetch, WebSearch) for current information.
-- For personal-context questions, prefer the KG (and the auto-injected context) before reaching for the web.`;
+- For personal-context questions, prefer the KG (and the auto-injected context) before reaching for the web.
+
+YOUR ACTUAL CAPABILITIES — be honest about what you can and cannot do:
+- You CAN: chat with the user, read/write/search the personal KG (the tools above), read and edit files on this machine, run shell commands via Bash, fetch URLs (WebFetch), and run web searches (WebSearch).
+- You CANNOT: send email, read mail, access calendars, schedule events, send notifications, control smart-home devices, run background jobs, integrate with Gmail/Calendar/Drive/Slack/Notion/Supabase or any third-party service, or take any action that isn't covered by the tools above.
+- Don't claim integrations or features that aren't in the list above. If the user asks for something you can't do, say so plainly and offer the closest thing you actually can do.`;
 
 interface ChatRequest {
   message: string;
@@ -80,7 +87,11 @@ app.post("/chat", async (c) => {
   return streamSSE(c, async (stream) => {
     if (subgraph.summary.edgeCount > 0 || subgraph.summary.nodeCount > 0) {
       await stream.writeSSE({
-        data: JSON.stringify({ type: "context", ...subgraph.summary }),
+        data: JSON.stringify({
+          type: "context",
+          ...subgraph.summary,
+          formatted: subgraph.formatted,
+        }),
       });
     }
 
@@ -186,6 +197,14 @@ app.post("/chat", async (c) => {
                 usage,
               }),
             });
+
+            // Smart title side-call (background, doesn't block stream).
+            const sid = typeof m.session_id === "string" ? m.session_id : null;
+            if (sid && m.subtype === "success") {
+              maybeSmartTitle(sid).catch((err) =>
+                console.warn("[smart-title]", err instanceof Error ? err.message : err),
+              );
+            }
             break;
           }
         }
@@ -197,6 +216,97 @@ app.post("/chat", async (c) => {
     }
   });
 });
+
+// ───────── Smart titling ─────────
+
+const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
+const SMART_TITLE_MIN_USER_TURNS = 2;
+const SMART_TITLE_MODEL = "claude-haiku-4-5-20251001";
+const titledSessions = new Set<string>();
+
+async function maybeSmartTitle(sessionId: string): Promise<void> {
+  if (titledSessions.has(sessionId)) return;
+
+  const sessions = await listSessions({
+    dir: PROJECT_DIR,
+    sessionStore: sqliteSessionStore,
+    includeWorktrees: false,
+  });
+  const info = sessions.find((s) => s.sessionId === sessionId);
+  if (!info) return;
+  if (info.customTitle) {
+    titledSessions.add(sessionId);
+    return;
+  }
+
+  const messages = await getSessionMessages(sessionId, {
+    dir: PROJECT_DIR,
+    sessionStore: sqliteSessionStore,
+  });
+  const turns: { role: "user" | "assistant"; content: string }[] = [];
+  for (const msg of messages) {
+    if (msg.type !== "user" && msg.type !== "assistant") continue;
+    const text = extractText(msg.message);
+    if (!text) continue;
+    turns.push({
+      role: msg.type,
+      content: msg.type === "user" ? stripContext(text) : text,
+    });
+  }
+  const userTurns = turns.filter((t) => t.role === "user").length;
+  if (userTurns < SMART_TITLE_MIN_USER_TURNS) return;
+
+  // Mark before the API call so concurrent turns don't double-fire.
+  titledSessions.add(sessionId);
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    console.warn("[smart-title] ANTHROPIC_API_KEY not set, skipping");
+    return;
+  }
+
+  const transcript = turns
+    .slice(0, 6)
+    .map((t) => `${t.role === "user" ? "User" : "Assistant"}: ${t.content.slice(0, 400)}`)
+    .join("\n\n");
+
+  const res = await fetch(ANTHROPIC_API_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: SMART_TITLE_MODEL,
+      max_tokens: 32,
+      messages: [
+        {
+          role: "user",
+          content: `Summarize this conversation as a title in 4-6 words. Reply with the title only — no quotes, no punctuation, no preamble.\n\n${transcript}`,
+        },
+      ],
+    }),
+  });
+  if (!res.ok) {
+    titledSessions.delete(sessionId);
+    throw new Error(`Title API ${res.status}`);
+  }
+  const json = (await res.json()) as {
+    content?: { type: string; text?: string }[];
+  };
+  const title = (json.content?.find((c) => c.type === "text")?.text ?? "")
+    .trim()
+    .replace(/^["'`]|["'`]$/g, "")
+    .replace(/\.$/, "")
+    .slice(0, 80);
+  if (!title) return;
+
+  await renameSession(sessionId, title, {
+    dir: PROJECT_DIR,
+    sessionStore: sqliteSessionStore,
+  });
+}
 
 // ───────── Sessions ─────────
 
@@ -273,11 +383,32 @@ app.delete("/sessions/:id", async (c) => {
   return c.json({ ok: true });
 });
 
+app.patch("/sessions/:id", async (c) => {
+  const id = c.req.param("id");
+  const body = await c.req
+    .json<{ title?: string }>()
+    .catch(() => ({} as { title?: string }));
+  const title = body.title?.trim();
+  if (!title) return c.json({ error: "title required" }, 400);
+  if (title.length > 200) return c.json({ error: "title too long" }, 400);
+  await renameSession(id, title, {
+    dir: PROJECT_DIR,
+    sessionStore: sqliteSessionStore,
+  });
+  titledSessions.add(id);
+  return c.json({ ok: true, title });
+});
+
 // ───────── KG (slash commands) ─────────
 
 app.get("/kg/recent", (c) => {
   const limit = Number(c.req.query("limit") ?? 20);
   return c.json(kg.recentNodes(Number.isFinite(limit) ? limit : 20));
+});
+
+app.get("/kg/recent-edges", (c) => {
+  const limit = Number(c.req.query("limit") ?? 8);
+  return c.json(kg.recentEdges(Number.isFinite(limit) ? limit : 8));
 });
 
 app.get("/kg/stats", (c) => c.json(kg.kgStats()));
@@ -322,6 +453,85 @@ app.get("/kg/graph", (c) => {
     .prepare(`SELECT id, from_id as fromId, to_id as toId, type FROM edges`)
     .all() as { id: string; fromId: string; toId: string; type: string }[];
   return c.json({ nodes, edges });
+});
+
+app.post("/kg/record-fact", async (c) => {
+  const body = await c.req.json<{
+    a: { name: string; type: string };
+    b: { name: string; type: string };
+    edgeType: string;
+  }>().catch(() => null);
+  if (!body) return c.json({ error: "invalid JSON" }, 400);
+  const aName = body.a?.name?.trim();
+  const bName = body.b?.name?.trim();
+  const aType = body.a?.type;
+  const bType = body.b?.type;
+  const edgeType = body.edgeType;
+  if (!aName || !bName || !aType || !bType || !edgeType) {
+    return c.json({ error: "a.name, a.type, b.name, b.type, edgeType required" }, 400);
+  }
+  if (!kg.NODE_TYPES.includes(aType as (typeof kg.NODE_TYPES)[number])) {
+    return c.json({ error: `invalid a.type "${aType}"` }, 400);
+  }
+  if (!kg.NODE_TYPES.includes(bType as (typeof kg.NODE_TYPES)[number])) {
+    return c.json({ error: `invalid b.type "${bType}"` }, 400);
+  }
+  if (!kg.EDGE_TYPES.includes(edgeType as (typeof kg.EDGE_TYPES)[number])) {
+    return c.json({ error: `invalid edgeType "${edgeType}"` }, 400);
+  }
+
+  const result = kg.link({
+    a: { nameOrId: aName, type: aType },
+    b: { nameOrId: bName, type: bType },
+    edgeType,
+    confidence: 1.0,
+  });
+
+  const newNodes: kg.Node[] = [];
+  if (result.created.aCreated) {
+    newNodes.push(result.a);
+    kg.recordProvenance({ factId: result.a.id, factKind: "node", source: "user_statement" });
+  }
+  if (result.created.bCreated) {
+    newNodes.push(result.b);
+    kg.recordProvenance({ factId: result.b.id, factKind: "node", source: "user_statement" });
+  }
+  kg.recordProvenance({ factId: result.edge.id, factKind: "edge", source: "user_statement" });
+
+  if (newNodes.length > 0) {
+    embedNodes(newNodes).catch((err) =>
+      console.warn("[record-fact] embedding failed:", err),
+    );
+  }
+
+  return c.json({
+    ok: true,
+    edge: result.edge,
+    a: result.a,
+    b: result.b,
+    created: result.created,
+  });
+});
+
+app.get("/kg/layout", (c) => {
+  return c.json(kg.getLayout());
+});
+
+app.post("/kg/layout", async (c) => {
+  const body = await c
+    .req.json<{ positions: { nodeId: string; x: number; y: number }[] }>()
+    .catch(() => null);
+  if (!body || !Array.isArray(body.positions)) {
+    return c.json({ error: "positions array required" }, 400);
+  }
+  const valid = body.positions.filter(
+    (p) =>
+      typeof p.nodeId === "string" &&
+      Number.isFinite(p.x) &&
+      Number.isFinite(p.y),
+  );
+  kg.saveLayout(valid);
+  return c.json({ ok: true, saved: valid.length });
 });
 
 app.get("/kg/export", (c) => {

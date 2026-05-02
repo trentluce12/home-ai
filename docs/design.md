@@ -12,6 +12,82 @@ A personal AI: streaming chat UI on top of the Anthropic API. Knowledge graph co
 
 Newest first. Append entries; don't edit history.
 
+### 2026-05-01 · M4.5 — production deployment + auth (design, not yet built)
+
+home-ai is moving from "localhost on my dev machine" to "Docker container + persistent volume on a machine I host, reachable from anywhere." Two things that the localhost setup hides become blocking-before-ship: there is no auth, and the agent's tool surface (Bash + Write + Edit + Read + Glob + Grep + WebFetch + WebSearch) is effectively remote code execution on a public URL. M4.5 closes that gap before M5 (notes layer) so we never accumulate sensitive data on an unauthed deployment.
+
+**Why before M5.** Auth retrofitted onto a public URL with real data is strictly worse than auth designed in before deploy. M5 will roughly double the volume of personal context home-ai stores (notes are richer than facts). Doing M4.5 first means M5 ships against a hardened deployable.
+
+**Auth — password + DB-backed session cookies.** Single-user, single password. Decisions:
+- Server reads `HOME_AI_PASSWORD_HASH` (bcrypt) from env at boot. No user table — the env hash *is* the credential set.
+- New table `auth_sessions(token TEXT PK, created_at, expires_at, last_seen_at)`. `token` is a 32-byte URL-safe random.
+- New routes: `POST /api/auth/login` (body: `{password}`) → set HttpOnly Secure SameSite=Lax cookie `home_ai_session=<token>`, return `{ok}`. `POST /api/auth/logout` → revoke. `GET /api/auth/me` → `{authenticated: bool}` for the SPA to gate render.
+- Middleware on all `/api/*` except auth routes: read cookie, lookup token, reject with 401 if missing/expired. Sliding expiry — bump `last_seen_at` on any authed request, expire after 30 days idle.
+- Brute-force defense: per-IP rate limit on `/api/auth/login` (5 attempts / 15 min) via a tiny in-memory bucket. No need for Redis at single-user scale.
+- HttpOnly cookies (not localStorage) so XSS can't exfil the session. Cookie set via Hono's `setCookie` helper.
+
+Considered and rejected: shared-secret-in-header (vulnerable to XSS), magic-link (needs email infra for one user), OIDC (overkill), JWTs (signing keys are operational complexity for nothing — DB lookup is fast enough).
+
+Considered and explicitly *out of scope but compatible*: putting Cloudflare Tunnel + Cloudflare Access in front and skipping in-app auth entirely. The above design doesn't preclude that — Cloudflare Access can sit upstream of an authed backend without conflict.
+
+**Tool narrowing.** Default `allowedTools` in prod drops `Bash`, `Write`, `Edit`. Keeps `Read`, `Glob`, `Grep`, `WebFetch`, `WebSearch`, plus all `mcp__kg__*`. Rationale: chat usage of home-ai doesn't actually exercise Bash/Write/Edit day-to-day; they're leftover from local-dev habits. Removing them shrinks the blast radius of an auth bypass to "read files in the container + browse the web" — much smaller than "execute arbitrary shell." Opt-in via `HOME_AI_ALLOW_WRITE_TOOLS=true` env var if a use case appears.
+
+**Container shape.** Multi-stage Dockerfile:
+- Builder stage: `node:22-alpine`, `npm ci` at workspace root, `npm run build` (server tsc + `vite build`).
+- Runtime stage: `node:22-alpine`, copy `server/dist`, `web/dist`, `node_modules` (prod-only), and `package.json`s. Entrypoint: `node server/dist/index.js`.
+- Non-root user (`uid 1000`). Read-only root FS. `/data` is the only writable mount, holds `kg.sqlite` (and its WAL + SHM sidecars).
+- Single exposed port from `PORT` env (default `8080` in prod, keeps `3001` in dev so nothing existing breaks).
+- No host docker socket mounted, no host network. Healthcheck: `GET /` → 200.
+
+**Single-origin frontend.** Hono will serve the built web bundle at `/` (and assets) so frontend + API share an origin. To make the route surface unambiguous, all existing API endpoints move under `/api/*`:
+- `/chat` → `/api/chat`
+- `/sessions[/...]` → `/api/sessions[/...]`
+- `/kg/*` → `/api/kg/*`
+
+Web client change: `SERVER_URL` constant in `web/src/lib/api.ts` becomes `import.meta.env.VITE_SERVER_URL ?? ""` — empty string for prod (relative paths), kept as `http://localhost:3001` in `.env.development`. CORS config drops the hardcoded origin and is removed entirely in prod (single origin, no preflight).
+
+**Prod boot.** `npm --workspace server run start` runs `node dist/index.js`. The Dockerfile entrypoint calls node directly so npm script overhead is gone. The dev-only `predev` seed-wipe is already correctly scoped to dev — `start` doesn't touch it. On first boot, `kg/db.ts` already runs `mkdirSync(DATA_DIR, { recursive: true })` and applies schema idempotently; `auth_sessions` joins the same `db.exec(SCHEMA_SQL)` block.
+
+**Backups.** Daily snapshot of the `/data` volume, scheduled via host cron or the user's Docker-host backup tool of choice. SQLite WAL + busy-timeout settings already make this snapshot-safe; backing up `kg.sqlite + kg.sqlite-wal + kg.sqlite-shm` together is sufficient.
+
+**Out of scope (intentionally).**
+- Multi-user accounts. Single-user is the deployment model.
+- TOTP / 2FA. Out of scope for a single-user app behind a strong password; revisit if threat model changes.
+- Audit logging. Stdout logs go to Docker's log driver; that's enough at single-user scale.
+- Reverse proxy choice. Caddy / Cloudflare Tunnel / nginx are all fine — out-of-band from this app.
+- Auto-update / migrations beyond the idempotent `db.exec(SCHEMA_SQL)` already in place.
+
+**Story breakdown for implementation.**
+1. `auth_sessions` table + session lifecycle helpers (server/src/auth/store.ts).
+2. `POST /api/auth/login` / `logout` / `me` routes + bcrypt verify + rate limit.
+3. Auth middleware + apply to all non-auth `/api/*` routes.
+4. Move all routes under `/api/` prefix. Update `web/src/lib/api.ts`.
+5. Login page in the web app + auth-state gate before app render.
+6. Hono static-file serving for `web/dist` (catch-all that doesn't shadow `/api/*`).
+7. Tool narrowing: env-driven `allowedTools` filter.
+8. Multi-stage Dockerfile + `.dockerignore` + a `docker-compose.yml` for local prod-shape testing.
+9. README updates: deploy instructions (env vars, volume mount, backup).
+
+Smoke test for ship: `docker compose up` on a clean machine, set env, hit the URL, log in, send a chat, see KG facts persist across container rebuild.
+
+### 2026-04-29 · backlog batch — 14 stories from `docs/backlog.md`
+
+All 14 backlog items shipped together on `dev-tl`. Notes on the non-trivial ones:
+
+**#10 Ground capabilities (system prompt).** Added an explicit "YOUR ACTUAL CAPABILITIES" section to `SYSTEM_PROMPT` listing what the model can/cannot do. The trigger was a chat where the model invented Gmail/Calendar integrations — listing the literal tool surface stops it from confabulating features that don't exist.
+
+**#11 Re-embed on rename.** `update_node` now snapshots `before` via `kg.getNode(id)` before mutating, then calls `embedNode(node)` if the name changed. Failures warn-and-continue (same pattern as `recordFact`). Closes the deferred-item flagged in M3.
+
+**#13 Smart titles.** After a successful `result` event, fire-and-forget `maybeSmartTitle(sessionId)`. Counts user turns from `getSessionMessages`; if ≥ 2 and no `customTitle`, sends a 32-token Haiku call (`claude-haiku-4-5-20251001`) summarizing the first 6 turns to a 4–6 word title, then `renameSession()`. An in-process `titledSessions: Set<string>` prevents double-firing on concurrent or repeat turns. Used a raw `fetch` against `/v1/messages` rather than pulling in `@anthropic-ai/sdk` — keeps deps unchanged and the Voyage embedding code already establishes the pattern.
+
+**#9 Saved graph layout.** New `node_layout(node_id PK FK ON DELETE CASCADE, x REAL, y REAL, updated_at)` — cascade was important so forgetting a node doesn't leave orphan rows. Two endpoints (`GET /kg/layout`, `POST /kg/layout`). On graph open, hydrate saved positions into `graphology` node attributes before rendering. New nodes (no saved layout) get seeded near the centroid of placed nodes so FA2 has somewhere to start. When a saved layout exists, FA2 runs with weak settings (`scalingRatio: 1, gravity: 0.1, slowDown: 20`) so it nudges new nodes into place without reflowing the whole graph; fresh layouts still get the original strong run. After the 4s settle, snapshot every node's `(x,y)` and POST.
+
+**#7 + #14 Token/cost.** Server-side, the `done` SSE event already included `usage` and `total_cost_usd`. Added a new `MemoryEvent` variant `DoneEvent`, render a quiet per-turn footnote in the sidebar, and a session-total footer (`$0.012 · 4.2k tokens · 87% cached`) at the bottom of the panel.
+
+**#3 Smart auto-scroll.** Track scroll-near-bottom on the `<main>` scroll container. `stickToBottomRef` is a ref (not state) because the scroll listener fires too often to round-trip through React. The "↓ jump to latest" button is a `position: sticky` element inside the scroll container, which keeps it visible even as `<main>` scrolls.
+
+**#1 Stop streaming.** `AbortController` per request stored in `abortRef`. On abort, `fetch` rejects — caught and ignored when `controller.signal.aborted` so no error banner pops up. Server side already terminates SSE cleanly on consumer disconnect, so no server changes needed.
+
 ### 2026-04-28 · M4 phase 2 — sigma.js memory graph
 
 Full-screen graph viz, opened via a Network icon in the header. New `GraphView` component is self-contained: fetches `/kg/graph` on open (and on every chat-completion `done` if the modal is up), builds a `graphology` Graph, places nodes with the circular layout helper, then runs `FA2Layout` (the worker variant) for ~4 seconds before stopping the simulation.

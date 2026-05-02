@@ -112,6 +112,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_session_entries_uuid
 
 CREATE INDEX IF NOT EXISTS idx_session_entries_session
   ON session_entries(project_key, session_id, subpath);
+
+CREATE TABLE IF NOT EXISTS node_layout (
+  node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+  x REAL NOT NULL,
+  y REAL NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 `;
 
 db.exec(SCHEMA_SQL);
@@ -497,6 +504,72 @@ export function recentNodes(limit: number = 10): Node[] {
     .prepare(`SELECT * FROM nodes ORDER BY updated_at DESC LIMIT ?`)
     .all(limit) as NodeRow[];
   return rows.map(nodeFromRow);
+}
+
+export interface RecentEdge {
+  id: string;
+  type: string;
+  createdAt: number;
+  from: { id: string; name: string; type: string };
+  to: { id: string; name: string; type: string };
+}
+
+export function recentEdges(limit: number = 10): RecentEdge[] {
+  const rows = db
+    .prepare(
+      `SELECT
+         e.id as id, e.type as type, e.created_at as created_at,
+         a.id as a_id, a.name as a_name, a.type as a_type,
+         b.id as b_id, b.name as b_name, b.type as b_type
+       FROM edges e
+       JOIN nodes a ON a.id = e.from_id
+       JOIN nodes b ON b.id = e.to_id
+       ORDER BY e.created_at DESC
+       LIMIT ?`,
+    )
+    .all(limit) as {
+    id: string;
+    type: string;
+    created_at: number;
+    a_id: string; a_name: string; a_type: string;
+    b_id: string; b_name: string; b_type: string;
+  }[];
+  return rows.map((r) => ({
+    id: r.id,
+    type: r.type,
+    createdAt: r.created_at,
+    from: { id: r.a_id, name: r.a_name, type: r.a_type },
+    to: { id: r.b_id, name: r.b_name, type: r.b_type },
+  }));
+}
+
+export interface NodeLayoutRow {
+  nodeId: string;
+  x: number;
+  y: number;
+}
+
+export function getLayout(): NodeLayoutRow[] {
+  const rows = db
+    .prepare(`SELECT node_id, x, y FROM node_layout`)
+    .all() as { node_id: string; x: number; y: number }[];
+  return rows.map((r) => ({ nodeId: r.node_id, x: r.x, y: r.y }));
+}
+
+export function saveLayout(positions: NodeLayoutRow[]): void {
+  if (positions.length === 0) return;
+  const now = Date.now();
+  const stmt = db.prepare(
+    `INSERT INTO node_layout (node_id, x, y, updated_at) VALUES (?, ?, ?, ?)
+     ON CONFLICT(node_id) DO UPDATE SET
+       x = excluded.x, y = excluded.y, updated_at = excluded.updated_at`,
+  );
+  const tx = db.transaction(() => {
+    for (const p of positions) {
+      stmt.run(p.nodeId, p.x, p.y, now);
+    }
+  });
+  tx();
 }
 
 export function recordProvenance(input: {
