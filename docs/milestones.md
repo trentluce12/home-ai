@@ -76,5 +76,14 @@ Split into three phases; each ships independently.
 
 ### Phase 3 — bulk import (deferred)
 
-- [ ] JSON import (accepts the export shape)
-- [ ] Obsidian markdown ingestion (likely via the agent itself in a one-off flow rather than a structured importer)
+Stories tracked in `tasks/planned/` (`m4p3-*`).
+
+## M4.5 — production deployment + auth (designed, not started)
+
+Self-hosted Docker deployment reachable from anywhere. Lands before M5 so notes don't accumulate on an unauthed URL. See `docs/design.md` for the full design entry. Stories tracked in `tasks/planned/` (`m45-*`).
+
+Smoke test: `docker compose up` on a clean machine, set env, hit URL, log in, send a chat, kill container, recreate, KG and sessions persist.
+
+## M5 — notes layer (planned, design pending)
+
+Layered knowledge base: facts (today's KG, structured) + notes (free-form markdown) + cross-layer links. Recording-rules and UX still being designed; see the in-progress design entry once it lands.

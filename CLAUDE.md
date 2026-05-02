@@ -5,10 +5,22 @@ A personal "home AI" — chat UI on top of the Anthropic API. Knowledge graph co
 ## Where context lives
 
 - **`docs/design.md`** — architecture overview + decisions log (read this first)
-- **`docs/milestones.md`** — M0–M4 status, what's done, what's next
+- **`docs/milestones.md`** — M-level status: what's shipped, what's next
+- **`tasks/planned/`, `tasks/in-progress/`** — per-story markdown files for pending work (Why / What / Files / Estimate)
 - **This file** — coding conventions and stack at a glance
 
-When making non-trivial decisions, append an entry to `docs/design.md`. When finishing or starting milestone work, update `docs/milestones.md`.
+When making non-trivial decisions, append an entry to `docs/design.md`. When closing out a milestone phase, update `docs/milestones.md`. Per-story state changes happen via the task workflow below — `docs/` reflects shipped reality, `tasks/` reflects pending work.
+
+## Task workflow
+
+Lifecycle: write a task in `tasks/planned/`, move to `tasks/in-progress/` when picking it up, delete on completion. Slash commands handle the file ops:
+
+- `/task-new <title>` — scaffold a new task in `tasks/planned/`
+- `/task-start <slug>` — move planned → in-progress
+- `/task-done <slug>` — delete the in-progress file + update `docs/milestones.md` / `docs/design.md` if the task closed a phase or made a non-trivial decision
+- `/tasks` — list current state (planned + in-progress)
+
+Done = deleted: git history + `docs/` keep the record, no `tasks/done/` graveyard.
 
 ## Stack
 
@@ -38,7 +50,6 @@ When making non-trivial decisions, append an entry to `docs/design.md`. When fin
 
 - Subagents (`.claude/agents/`)
 - Skills (`.claude/skills/`)
-- Slash commands beyond `/check`
 - Hooks
 - Prompt caching, adaptive thinking, conversation persistence
 
