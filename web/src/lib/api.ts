@@ -180,6 +180,19 @@ export const api = {
       body: JSON.stringify(input),
     }),
   exportUrl: (format: "json" | "dot") => `${SERVER_URL}/api/kg/export?format=${format}`,
+  importKg: (input: { nodes: unknown[]; edges: unknown[]; replaceAll?: boolean }) =>
+    jsonFetch<{
+      ok: true;
+      nodesInserted: number;
+      nodesSkipped: number;
+      edgesInserted: number;
+      edgesSkipped: number;
+      replaceAll: boolean;
+    }>(`/api/kg/import`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    }),
   graph: () => jsonFetch<GraphData>("/api/kg/graph"),
   nodeDetail: (id: string) => jsonFetch<NodeDetail>(`/api/kg/node/${id}`),
   getLayout: () => jsonFetch<NodeLayoutEntry[]>("/api/kg/layout"),

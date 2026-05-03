@@ -12,6 +12,34 @@ A personal AI: streaming chat UI on top of the Anthropic API. Knowledge graph co
 
 Newest first. Append entries; don't edit history.
 
+### 2026-05-03 · Obsidian markdown import — runtime agent flow, not structured importer
+
+`m4p3-obsidian-import` ships as a **system-prompt extension** for the home-ai chat agent rather than a structured parser. Markdown is too varied across users (vault conventions, tag dialects, frontmatter discipline) to reliably extract facts via regex; the model has to do the judgement work. So the implementation is a runtime flow — when a user asks for an Obsidian import or types `/import-obsidian <path>` in chat, the home-ai agent walks the vault using its existing `Read` + `Glob` tools and records facts via `mcp__kg__record_user_fact`.
+
+**Why a system-prompt rule, not a slash command in the API.** "Typing `/anything` just sends to chat" was locked in during M4 phase 1 (no command parsing in the input layer). So `/import-obsidian` in the chat input is just a literal string — the system prompt teaches the agent to recognize the prefix and switch into bulk-extract mode. Same approach as the M2 `<context>` block: model-driven instead of code-driven.
+
+**Idempotency: tool-driven, not schema-driven.** `link()` already dedupes nodes via `findOrCreateNode` (lookup by `(name, type)`), but `addEdge()` always inserts a new row. Adding edge-level dedup at the schema layer was tempting but out of scope — it would change every fact-recording path (chat agent, seed, JSON import, web record-fact endpoint). Instead the system prompt instructs the agent to call `mcp__kg__neighbors` on the source node before each `record_user_fact` and skip if an edge of the same type to a node with the same name exists. This keeps edge-dedup as a per-flow concern (the import flow needs it; the chat-fact flow doesn't, since users restating "my dog is Snickers" twice is rare and harmless).
+
+**`record_inferred_fact` is generally off-limits in this flow.** When the user explicitly invokes the import, anything the agent records is implicitly under user authority — `record_user_fact` is the right confidence semantic. The exception is when the note prose itself flags uncertainty ("I think...", "probably..."), in which case the inferred-fact tool is correct.
+
+**Companion `.claude/commands/import-obsidian.md`** is shipped as a thin reference card for the dev harness — it points the maintainer at the home-ai chat flow rather than doing the import itself, since Claude Code can't reach the home-ai KG MCP server. It does an existence check on the path via `Glob` so a typo is caught before the user wastes a chat turn on it.
+
+**Out of scope.** Build-time (seed-time) Obsidian import — facts that survive a `predev` reset — would extend `/seed-fact` rather than this flow; that's a separate task if it ever proves useful.
+
+### 2026-05-03 · JSON KG import — merge strategy + ID rewriting
+
+`m4p3-json-import` round-trips the existing `/api/kg/export` JSON. Three calls worth pinning:
+
+**Default merge skips on `(name, type)` collision; flag for replace-all.** Re-importing the same backup twice should be idempotent — adding a second copy of every node would silently double the graph. Skipping by `(name, type)` matches the FTS lookup key the rest of the system uses (`findNodeByName(name, type)`). Replace-all is opt-in via a checkbox + browser `confirm()` because it deletes everything first; without an explicit gate it's too easy to nuke a working KG by re-importing into the wrong target.
+
+**New IDs always; old IDs only used for edge wiring.** The export carries arbitrary `node_*` IDs that may collide with current rows (especially after a wipe/restore cycle that mints fresh IDs). Reusing them via `INSERT` would either fail on PK conflict or, worse, silently scribble onto unrelated rows. Instead we mint fresh IDs and build an old-id → new-id map; edges then resolve through the map. Edges whose endpoint maps to nothing (e.g., the snapshot is partial, or replace-all skipped a corrupt node row) are dropped with a count rather than failing the whole import — same posture as embedding failure: best-effort, count what you got.
+
+**One transaction wraps everything.** A bad row mid-snapshot rolls the whole import back. Implemented via `db.transaction(...)` (better-sqlite3's wrapper that re-throws on inner exception). Cheaper than chunking and gets us atomicity for free.
+
+**`bulk_import` added to `FACT_SOURCES`.** Provenance gains a fourth source alongside `user_statement | agent_inference | seed`. Lets a future "where did this fact come from?" UI distinguish backup-restored rows from organically-recorded ones, and lets the inferred-rule layer (when it lands) skip imported facts if needed.
+
+**Embeddings stay regenerable, not transmitted.** The export already strips them; the import re-runs `embedNodes` in the background after the SQL transaction commits. Failure is non-fatal — FTS still works, hybrid retrieval just skips the cosine pass for unembedded nodes until a future re-embed run catches them. Same posture as `record-fact`.
+
 ### 2026-05-02 · ESLint + Prettier across both workspaces
 
 `chore-lint-format` set up the gates the updated story-implementer contract will key off (`npm run lint`, `npm run format:check`). Stack: ESLint 9 flat config (`eslint.config.mjs` at the repo root), `@eslint/js` + `typescript-eslint` recommended, plus `eslint-plugin-react` + `eslint-plugin-react-hooks` scoped to `web/**`. Prettier 3 with a config that matches the existing house style (2 sp, double quotes, `printWidth: 90`, `endOfLine: "lf"`). `eslint-config-prettier` last in the rule chain so the two tools don't fight over layout. Per-workspace `lint`/`lint:fix`/`format`/`format:check` scripts mirror the root ones — both spellings work.

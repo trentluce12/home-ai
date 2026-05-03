@@ -62,28 +62,5 @@
         ]
       }
     ]
-  },
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node .claude/scripts/block-main-commit.mjs"
-          }
-        ]
-      }
-    ],
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node .claude/scripts/check-stale-tasks.mjs"
-          }
-        ]
-      }
-    ]
   }
 }

@@ -156,7 +156,12 @@ export const NODE_TYPES = [
   "Pet",
 ] as const;
 
-export const FACT_SOURCES = ["user_statement", "agent_inference", "seed"] as const;
+export const FACT_SOURCES = [
+  "user_statement",
+  "agent_inference",
+  "seed",
+  "bulk_import",
+] as const;
 export type FactSource = (typeof FACT_SOURCES)[number];
 
 export const EDGE_TYPES = [
@@ -503,6 +508,141 @@ export function exportKg(): KgExport {
       sourceRef: p.source_ref,
       createdAt: p.created_at,
     })),
+  };
+}
+
+/**
+ * Bulk-import a KG snapshot produced by `exportKg()`. Wraps everything in a
+ * single transaction so a partial failure rolls back cleanly.
+ *
+ * Merge strategy:
+ * - `replaceAll: false` (default): skip nodes whose (name, type) pair already
+ *   exists in the DB; create everything else with fresh IDs (the export carries
+ *   arbitrary IDs that may collide with current rows). Edges are rewritten via
+ *   an old-id → new-id map; an edge whose endpoint maps to neither a freshly
+ *   inserted node nor an existing-by-(name,type) row is dropped.
+ * - `replaceAll: true`: wipes nodes/edges/provenance/embeddings/layout first,
+ *   then inserts everything from the snapshot with fresh IDs.
+ *
+ * Embeddings are NOT carried in the export (they're regenerable), so the
+ * caller is expected to call `embedNodes(insertedNodes)` after a successful
+ * import.
+ *
+ * Returns counts and the freshly inserted nodes (so the HTTP layer can kick
+ * off background re-embedding without re-querying the DB).
+ */
+export interface KgImportResult {
+  nodesInserted: number;
+  nodesSkipped: number;
+  edgesInserted: number;
+  edgesSkipped: number;
+  insertedNodes: Node[];
+}
+
+export function importKg(
+  snapshot: { nodes: Node[]; edges: Edge[] },
+  opts: { replaceAll?: boolean } = {},
+): KgImportResult {
+  const replaceAll = opts.replaceAll === true;
+  const insertedNodes: Node[] = [];
+  let nodesSkipped = 0;
+  let edgesInserted = 0;
+  let edgesSkipped = 0;
+  // Maps imported (snapshot) node IDs to the IDs they resolve to in the live
+  // DB — either a freshly minted ID (insert) or the existing row's ID (skip).
+  const idMap = new Map<string, string>();
+
+  const tx = db.transaction(() => {
+    if (replaceAll) {
+      // Order: child rows before parent. node_layout / node_embeddings cascade
+      // off nodes(id), but provenance and edges don't (provenance has no FK at
+      // all; edges cascade via from_id/to_id, but explicit DELETE is clearer
+      // and lets us count rows if we ever want to log it).
+      db.exec(`
+        DELETE FROM node_embeddings;
+        DELETE FROM node_layout;
+        DELETE FROM provenance;
+        DELETE FROM edges;
+        DELETE FROM nodes;
+      `);
+    }
+
+    const findExistingStmt = db.prepare(
+      `SELECT id FROM nodes WHERE name = ? AND type = ? LIMIT 1`,
+    );
+    const insertNodeStmt = db.prepare(
+      `INSERT INTO nodes (id, type, name, props_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+    );
+    const insertEdgeStmt = db.prepare(
+      `INSERT INTO edges (id, from_id, to_id, type, props_json, confidence, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const insertProvStmt = db.prepare(
+      `INSERT INTO provenance (fact_id, fact_kind, source, source_ref, created_at) VALUES (?, ?, ?, ?, ?)`,
+    );
+
+    const now = Date.now();
+
+    for (const n of snapshot.nodes) {
+      // Skip path: a row with the same (name, type) already exists. We only
+      // hit this branch when replaceAll=false (otherwise we wiped the table).
+      if (!replaceAll) {
+        const existing = findExistingStmt.get(n.name, n.type) as
+          | { id: string }
+          | undefined;
+        if (existing) {
+          idMap.set(n.id, existing.id);
+          nodesSkipped++;
+          continue;
+        }
+      }
+
+      const newId = newNodeId();
+      idMap.set(n.id, newId);
+      const propsJson = JSON.stringify(n.props ?? {});
+      // Preserve original timestamps when present so `recent` views look
+      // sensible after a restore. Fall back to `now` if the snapshot is missing
+      // them (e.g., hand-edited JSON).
+      const createdAt = typeof n.createdAt === "number" ? n.createdAt : now;
+      const updatedAt = typeof n.updatedAt === "number" ? n.updatedAt : now;
+      insertNodeStmt.run(newId, n.type, n.name, propsJson, createdAt, updatedAt);
+      insertProvStmt.run(newId, "node", "bulk_import", null, now);
+      insertedNodes.push({
+        id: newId,
+        type: n.type,
+        name: n.name,
+        props: n.props ?? {},
+        createdAt,
+        updatedAt,
+      });
+    }
+
+    for (const e of snapshot.edges) {
+      const fromId = idMap.get(e.fromId);
+      const toId = idMap.get(e.toId);
+      // Either endpoint missing means the edge dangles — skip rather than fail
+      // the whole import. Most common cause is a malformed snapshot; partial
+      // imports (e.g., subset JSON) also benefit from this leniency.
+      if (!fromId || !toId) {
+        edgesSkipped++;
+        continue;
+      }
+      const newId = newEdgeId();
+      const propsJson = JSON.stringify(e.props ?? {});
+      const confidence = typeof e.confidence === "number" ? e.confidence : 1.0;
+      const createdAt = typeof e.createdAt === "number" ? e.createdAt : now;
+      insertEdgeStmt.run(newId, fromId, toId, e.type, propsJson, confidence, createdAt);
+      insertProvStmt.run(newId, "edge", "bulk_import", null, now);
+      edgesInserted++;
+    }
+  });
+  tx();
+
+  return {
+    nodesInserted: insertedNodes.length,
+    nodesSkipped,
+    edgesInserted,
+    edgesSkipped,
+    insertedNodes,
   };
 }
 

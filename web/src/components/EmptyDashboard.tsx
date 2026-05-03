@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { Download, ArrowRight, AlertTriangle, Trash2, Plus } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Download, Upload, ArrowRight, AlertTriangle, Trash2, Plus } from "lucide-react";
 import {
   api,
   EDGE_TYPES,
@@ -23,6 +23,7 @@ export function EmptyDashboard({ refreshKey, onChange }: Props) {
       <AddFactForm onChange={onChange} />
       <ForgetForm onChange={onChange} />
       <ExportRow />
+      <ImportRow onChange={onChange} />
     </div>
   );
 }
@@ -408,6 +409,118 @@ function ExportRow() {
           <Download className="h-3.5 w-3.5" /> Graphviz (.dot)
         </a>
       </div>
+    </section>
+  );
+}
+
+function ImportRow({ onChange }: { onChange: () => void }) {
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [replaceAll, setReplaceAll] = useState(false);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+
+  function clickPicker() {
+    fileInputRef.current?.click();
+  }
+
+  async function onFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    // Always reset the input value so picking the same file twice in a row
+    // re-fires onChange (browsers suppress the event for an unchanged value).
+    e.target.value = "";
+    if (!file) return;
+
+    setError(null);
+    setSuccess(null);
+
+    if (
+      replaceAll &&
+      !window.confirm(
+        "Replace-all will WIPE the current knowledge graph (nodes, edges, provenance, embeddings, layout) before importing. This cannot be undone. Continue?",
+      )
+    ) {
+      return;
+    }
+
+    setPending(true);
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text) as { nodes?: unknown; edges?: unknown };
+      if (!Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) {
+        throw new Error("File missing nodes or edges array");
+      }
+      const result = await api.importKg({
+        nodes: parsed.nodes,
+        edges: parsed.edges,
+        replaceAll,
+      });
+      const parts = [
+        `${result.nodesInserted} nodes`,
+        `${result.nodesSkipped} skipped`,
+        `${result.edgesInserted} edges`,
+      ];
+      if (result.edgesSkipped > 0) parts.push(`${result.edgesSkipped} edges skipped`);
+      setSuccess(parts.join(" · "));
+      onChange();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <section>
+      <SectionLabel>import</SectionLabel>
+      <p className="mb-3 text-xs text-zinc-500">
+        Restore from a JSON snapshot. By default, nodes whose name + type already exist
+        are skipped. Embeddings re-generate in the background.
+      </p>
+      <div className="flex flex-col gap-2 rounded-lg border border-zinc-800 bg-zinc-900/40 px-3 py-3">
+        <label className="flex items-center gap-2 text-xs text-zinc-400">
+          <input
+            type="checkbox"
+            checked={replaceAll}
+            onChange={(e) => setReplaceAll(e.target.checked)}
+            className="h-3.5 w-3.5 rounded border-zinc-700 bg-zinc-950 text-zinc-100 focus:ring-0 focus:ring-offset-0"
+          />
+          <span>
+            Replace all <span className="text-zinc-600">— wipes the KG first</span>
+          </span>
+        </label>
+
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="application/json,.json"
+          onChange={onFileChange}
+          className="hidden"
+        />
+        <button
+          type="button"
+          onClick={clickPicker}
+          disabled={pending}
+          className="flex items-center justify-center gap-2 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 transition hover:border-zinc-700 hover:bg-zinc-900/80 disabled:opacity-60"
+        >
+          <Upload className="h-3.5 w-3.5" />
+          {pending ? "importing…" : "Choose JSON file…"}
+        </button>
+
+        {replaceAll && (
+          <div className="flex items-start gap-2 rounded-md border border-amber-900/50 bg-amber-950/20 px-3 py-2 text-xs text-amber-300">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>
+              Replace-all will permanently delete the current graph before importing.
+            </span>
+          </div>
+        )}
+      </div>
+
+      {error && <p className="mt-2 text-xs text-red-400">{error}</p>}
+      {success && (
+        <p className="mt-2 font-mono text-xs text-emerald-400">imported: {success}</p>
+      )}
     </section>
   );
 }
