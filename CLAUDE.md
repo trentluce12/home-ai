@@ -40,7 +40,9 @@ Done = deleted: git history + `docs/` keep the record, no `tasks/done/` graveyar
 
 - `npm run dev` — start both servers (wipes the KG and reseeds it from `server/src/seed.ts` first)
 - `npm run typecheck` — typecheck both workspaces
-- `/check` — same as above, via slash command
+- `npm run lint` / `npm run lint:fix` — ESLint across both workspaces (flat config in `eslint.config.mjs`)
+- `npm run format` / `npm run format:check` — Prettier (`.prettierrc.json`); markdown is intentionally ignored to keep prose untouched
+- `/check` — same as typecheck, via slash command
 
 ## Seed data
 

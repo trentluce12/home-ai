@@ -2,14 +2,92 @@ import { db, getAllEmbeddings, neighbors, type Node, type Edge } from "./db.js";
 import { embedQuery } from "../embeddings/index.js";
 
 const STOPWORDS = new Set([
-  "the", "a", "an", "and", "or", "but", "if", "of", "to", "in", "on", "at", "by",
-  "for", "with", "from", "as", "is", "are", "was", "were", "be", "been", "being",
-  "have", "has", "had", "do", "does", "did", "will", "would", "could", "should",
-  "may", "might", "can", "i", "you", "he", "she", "it", "we", "they", "me", "him",
-  "her", "us", "them", "my", "your", "his", "its", "our", "their", "this", "that",
-  "these", "those", "what", "which", "who", "whom", "whose", "when", "where", "why",
-  "how", "all", "any", "some", "no", "not", "so", "than", "too", "very", "just",
-  "about", "tell", "know", "think", "say", "said", "tells", "told",
+  "the",
+  "a",
+  "an",
+  "and",
+  "or",
+  "but",
+  "if",
+  "of",
+  "to",
+  "in",
+  "on",
+  "at",
+  "by",
+  "for",
+  "with",
+  "from",
+  "as",
+  "is",
+  "are",
+  "was",
+  "were",
+  "be",
+  "been",
+  "being",
+  "have",
+  "has",
+  "had",
+  "do",
+  "does",
+  "did",
+  "will",
+  "would",
+  "could",
+  "should",
+  "may",
+  "might",
+  "can",
+  "i",
+  "you",
+  "he",
+  "she",
+  "it",
+  "we",
+  "they",
+  "me",
+  "him",
+  "her",
+  "us",
+  "them",
+  "my",
+  "your",
+  "his",
+  "its",
+  "our",
+  "their",
+  "this",
+  "that",
+  "these",
+  "those",
+  "what",
+  "which",
+  "who",
+  "whom",
+  "whose",
+  "when",
+  "where",
+  "why",
+  "how",
+  "all",
+  "any",
+  "some",
+  "no",
+  "not",
+  "so",
+  "than",
+  "too",
+  "very",
+  "just",
+  "about",
+  "tell",
+  "know",
+  "think",
+  "say",
+  "said",
+  "tells",
+  "told",
 ]);
 
 function tokenize(text: string): string[] {
@@ -138,10 +216,7 @@ export async function retrieveSubgraph(
   if (ftsHits.length > 0) retrievers.push("fts");
   if (cosineHits.length > 0) retrievers.push("cosine");
 
-  const fused = rrfFuse([
-    ftsHits.map((h) => h.id),
-    cosineHits.map((h) => h.id),
-  ]);
+  const fused = rrfFuse([ftsHits.map((h) => h.id), cosineHits.map((h) => h.id)]);
 
   if (fused.size === 0) return EMPTY;
 
@@ -180,11 +255,11 @@ export async function retrieveSubgraph(
       const fromNode =
         hop.edge.fromId === root.id
           ? root
-          : seen.get(hop.edge.fromId) ?? rowToNodeOrNull(nodeStmt.get(hop.edge.fromId));
+          : (seen.get(hop.edge.fromId) ?? rowToNodeOrNull(nodeStmt.get(hop.edge.fromId)));
       const toNode =
         hop.edge.toId === root.id
           ? root
-          : seen.get(hop.edge.toId) ?? rowToNodeOrNull(nodeStmt.get(hop.edge.toId));
+          : (seen.get(hop.edge.toId) ?? rowToNodeOrNull(nodeStmt.get(hop.edge.toId)));
       if (!fromNode || !toNode) continue;
 
       seen.set(fromNode.id, fromNode);
@@ -200,7 +275,9 @@ export async function retrieveSubgraph(
 
   const lines: string[] = [];
   for (const e of edges) {
-    lines.push(`- ${e.from.name} (${e.from.type}) ${e.edge.type} ${e.to.name} (${e.to.type})`);
+    lines.push(
+      `- ${e.from.name} (${e.from.type}) ${e.edge.type} ${e.to.name} (${e.to.type})`,
+    );
   }
   for (const r of orphanRoots) {
     lines.push(`- ${r.name} (${r.type})`);

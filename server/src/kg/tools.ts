@@ -60,12 +60,24 @@ const searchTool = tool(
   "search",
   "Full-text search over the knowledge graph. Returns matching nodes (Person, Place, Device, etc.). Use only when the auto-injected <context> block looks insufficient.",
   {
-    query: z.string().describe("Search query — matched against node names and properties"),
+    query: z
+      .string()
+      .describe("Search query — matched against node names and properties"),
     types: z.array(z.string()).optional().describe("Filter by entity types"),
-    limit: z.number().int().min(1).max(50).optional().describe("Max results (default 10)"),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(50)
+      .optional()
+      .describe("Max results (default 10)"),
   },
   async (args) => {
-    const results = kg.search({ query: args.query, types: args.types, limit: args.limit });
+    const results = kg.search({
+      query: args.query,
+      types: args.types,
+      limit: args.limit,
+    });
     return {
       content: [
         {
@@ -82,7 +94,10 @@ const getTool = tool(
   "Get a node by its ID, optionally with its 1-hop neighborhood.",
   {
     id: z.string().describe("Node ID (starts with 'node_')"),
-    withNeighbors: z.boolean().optional().describe("Include 1-hop neighbors (default false)"),
+    withNeighbors: z
+      .boolean()
+      .optional()
+      .describe("Include 1-hop neighbors (default false)"),
   },
   async (args) => {
     const node = kg.getNode(args.id);
@@ -129,7 +144,9 @@ const recordUserFactTool = tool(
     const noteA = result.created.aCreated ? ` (new: ${result.a.id})` : "";
     const noteB = result.created.bCreated ? ` (new: ${result.b.id})` : "";
     return {
-      content: [{ type: "text", text: `Recorded (user-stated): ${summary}${noteA}${noteB}` }],
+      content: [
+        { type: "text", text: `Recorded (user-stated): ${summary}${noteA}${noteB}` },
+      ],
     };
   },
 );
@@ -183,7 +200,9 @@ const updateNodeTool = tool(
       }
     }
     return {
-      content: [{ type: "text", text: `Updated ${node.type} "${node.name}" (id: ${node.id})` }],
+      content: [
+        { type: "text", text: `Updated ${node.type} "${node.name}" (id: ${node.id})` },
+      ],
     };
   },
 );

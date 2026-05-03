@@ -83,7 +83,9 @@ function StatsAndRecent({ refreshKey }: { refreshKey: number }) {
         <div className="flex items-baseline gap-3">
           <span className="text-2xl font-medium text-zinc-100">{stats.nodeCount}</span>
           <span className="text-xs text-zinc-500">nodes</span>
-          <span className="ml-2 text-2xl font-medium text-zinc-100">{stats.edgeCount}</span>
+          <span className="ml-2 text-2xl font-medium text-zinc-100">
+            {stats.edgeCount}
+          </span>
           <span className="text-xs text-zinc-500">edges</span>
         </div>
         {types.length > 0 && (
@@ -132,9 +134,7 @@ function StatsAndRecent({ refreshKey }: { refreshKey: number }) {
               >
                 <div className="min-w-0 truncate text-sm">
                   <span className="text-zinc-200">{e.from.name}</span>
-                  <span className="mx-1.5 font-mono text-xs text-zinc-500">
-                    {e.type}
-                  </span>
+                  <span className="mx-1.5 font-mono text-xs text-zinc-500">{e.type}</span>
                   <span className="text-zinc-200">{e.to.name}</span>
                 </div>
                 <span className="font-mono text-[10px] text-zinc-600">

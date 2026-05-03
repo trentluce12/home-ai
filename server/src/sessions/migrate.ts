@@ -55,10 +55,7 @@ async function importJsonl(file: string, sessionId: string): Promise<number> {
   }
 
   if (batch.length > 0) {
-    await sqliteSessionStore.append(
-      { projectKey: TARGET_PROJECT_KEY, sessionId },
-      batch,
-    );
+    await sqliteSessionStore.append({ projectKey: TARGET_PROJECT_KEY, sessionId }, batch);
     total += batch.length;
   }
 

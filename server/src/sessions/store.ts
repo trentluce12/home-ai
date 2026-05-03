@@ -149,10 +149,7 @@ export const sqliteSessionStore: SessionStore = {
     }
   },
 
-  async listSubkeys(key: {
-    projectKey: string;
-    sessionId: string;
-  }): Promise<string[]> {
+  async listSubkeys(key: { projectKey: string; sessionId: string }): Promise<string[]> {
     const rows = listSubkeysStmt.all(key.projectKey, key.sessionId) as {
       subpath: string;
     }[];

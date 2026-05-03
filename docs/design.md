@@ -12,6 +12,20 @@ A personal AI: streaming chat UI on top of the Anthropic API. Knowledge graph co
 
 Newest first. Append entries; don't edit history.
 
+### 2026-05-02 · ESLint + Prettier across both workspaces
+
+`chore-lint-format` set up the gates the updated story-implementer contract will key off (`npm run lint`, `npm run format:check`). Stack: ESLint 9 flat config (`eslint.config.mjs` at the repo root), `@eslint/js` + `typescript-eslint` recommended, plus `eslint-plugin-react` + `eslint-plugin-react-hooks` scoped to `web/**`. Prettier 3 with a config that matches the existing house style (2 sp, double quotes, `printWidth: 90`, `endOfLine: "lf"`). `eslint-config-prettier` last in the rule chain so the two tools don't fight over layout. Per-workspace `lint`/`lint:fix`/`format`/`format:check` scripts mirror the root ones — both spellings work.
+
+Two judgement calls worth pinning:
+
+**Markdown excluded from Prettier (`.prettierignore`).** A first run showed Prettier wanted to rewrite `*emphasis*` → `_emphasis_` and add blank lines after section headers across every `docs/`, `tasks/`, and `.claude/commands/` markdown file. That's high-churn, low-value reformatting of carefully hand-authored prose. Markdown is in `.prettierignore` project-wide; if a future task wants prose-rule enforcement, it should pick a markdown-aware linter (e.g., `markdownlint`) rather than Prettier's blunt reformat.
+
+**`react/no-unescaped-entities` disabled.** The rule fires on bare `'` and `"` inside JSX text (e.g., `<p>what's on your mind?</p>`). React renders these fine; escaping them as HTML entities makes the source string less readable. Off project-wide. Other react-recommended rules stay on.
+
+**Flat config in `.mjs`, not `.js`.** Avoids forcing `"type": "module"` on the root `package.json` (which would change how Node resolves every `.js` we add at the root later — currently we have `web/postcss.config.js` in the existing CommonJS-by-default world). The `.mjs` extension is unambiguous to Node.
+
+Existing source got reformatted in one sweep so the gates start green. The diff is mechanical (line-wrapping, trailing comma, etc.) — no semantic changes. `server/src/index.ts` was among the touched files, which overlaps with the still-parked `m45-api-prefix` task that needs to edit it; flagged for the main thread.
+
 ### 2026-05-02 · `.claude/` workflow hardening — 6-area design
 
 Started this session intending to nail down a structured way of working on home-ai. Too much had been emerging ad-hoc: the task lifecycle was half-defined, `/task-start` did less than its name implied, the ralph-loop pitch existed but had no infrastructure, and rules like "never commit on main" were user-vigilance rather than enforced. Designed across six areas and queued the build-out as 18 task files in `tasks/planned/`.

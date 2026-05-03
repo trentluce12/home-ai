@@ -31,9 +31,7 @@ export function cleanupSessions(opts: CleanupOptions = {}): CleanupResult {
 
   if (deleteDays > 0) {
     const cutoff = now - deleteDays * DAY_MS;
-    const result = db
-      .prepare(`DELETE FROM sessions WHERE last_active < ?`)
-      .run(cutoff);
+    const result = db.prepare(`DELETE FROM sessions WHERE last_active < ?`).run(cutoff);
     deleted = Number(result.changes);
   }
 

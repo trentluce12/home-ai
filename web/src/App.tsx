@@ -195,14 +195,15 @@ export default function App() {
         ]);
         break;
       case "done": {
-        const usage = (payload.usage as
-          | {
-              input_tokens?: number;
-              output_tokens?: number;
-              cache_read_input_tokens?: number;
-              cache_creation_input_tokens?: number;
-            }
-          | undefined) ?? {};
+        const usage =
+          (payload.usage as
+            | {
+                input_tokens?: number;
+                output_tokens?: number;
+                cache_read_input_tokens?: number;
+                cache_creation_input_tokens?: number;
+              }
+            | undefined) ?? {};
         setMemoryEvents((curr) => [
           ...curr,
           {
@@ -263,7 +264,11 @@ export default function App() {
           refreshKey={refreshKey}
         />
 
-        <main ref={scrollRef} onScroll={onScroll} className="relative flex-1 overflow-y-auto">
+        <main
+          ref={scrollRef}
+          onScroll={onScroll}
+          className="relative flex-1 overflow-y-auto"
+        >
           <div className="mx-auto flex h-full max-w-2xl flex-col px-6 py-10">
             {empty ? (
               <EmptyDashboard

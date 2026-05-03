@@ -349,8 +349,7 @@ app.get("/sessions", async (c) => {
       .filter((s) => includeArchived || !archivedSet.has(s.sessionId))
       .map((s) => ({
         id: s.sessionId,
-        title:
-          s.customTitle ?? (s.firstPrompt ? stripContext(s.firstPrompt) : s.summary),
+        title: s.customTitle ?? (s.firstPrompt ? stripContext(s.firstPrompt) : s.summary),
         lastModified: s.lastModified,
         archived: archivedSet.has(s.sessionId),
       }))
@@ -387,7 +386,7 @@ app.patch("/sessions/:id", async (c) => {
   const id = c.req.param("id");
   const body = await c.req
     .json<{ title?: string }>()
-    .catch(() => ({} as { title?: string }));
+    .catch(() => ({}) as { title?: string });
   const title = body.title?.trim();
   if (!title) return c.json({ error: "title required" }, 400);
   if (title.length > 200) return c.json({ error: "title too long" }, 400);
@@ -446,9 +445,11 @@ app.delete("/kg/node/:id", (c) => {
 });
 
 app.get("/kg/graph", (c) => {
-  const nodes = db
-    .prepare(`SELECT id, name, type FROM nodes`)
-    .all() as { id: string; name: string; type: string }[];
+  const nodes = db.prepare(`SELECT id, name, type FROM nodes`).all() as {
+    id: string;
+    name: string;
+    type: string;
+  }[];
   const edges = db
     .prepare(`SELECT id, from_id as fromId, to_id as toId, type FROM edges`)
     .all() as { id: string; fromId: string; toId: string; type: string }[];
@@ -456,11 +457,13 @@ app.get("/kg/graph", (c) => {
 });
 
 app.post("/kg/record-fact", async (c) => {
-  const body = await c.req.json<{
-    a: { name: string; type: string };
-    b: { name: string; type: string };
-    edgeType: string;
-  }>().catch(() => null);
+  const body = await c.req
+    .json<{
+      a: { name: string; type: string };
+      b: { name: string; type: string };
+      edgeType: string;
+    }>()
+    .catch(() => null);
   if (!body) return c.json({ error: "invalid JSON" }, 400);
   const aName = body.a?.name?.trim();
   const bName = body.b?.name?.trim();
@@ -490,13 +493,25 @@ app.post("/kg/record-fact", async (c) => {
   const newNodes: kg.Node[] = [];
   if (result.created.aCreated) {
     newNodes.push(result.a);
-    kg.recordProvenance({ factId: result.a.id, factKind: "node", source: "user_statement" });
+    kg.recordProvenance({
+      factId: result.a.id,
+      factKind: "node",
+      source: "user_statement",
+    });
   }
   if (result.created.bCreated) {
     newNodes.push(result.b);
-    kg.recordProvenance({ factId: result.b.id, factKind: "node", source: "user_statement" });
+    kg.recordProvenance({
+      factId: result.b.id,
+      factKind: "node",
+      source: "user_statement",
+    });
   }
-  kg.recordProvenance({ factId: result.edge.id, factKind: "edge", source: "user_statement" });
+  kg.recordProvenance({
+    factId: result.edge.id,
+    factKind: "edge",
+    source: "user_statement",
+  });
 
   if (newNodes.length > 0) {
     embedNodes(newNodes).catch((err) =>
@@ -518,17 +533,14 @@ app.get("/kg/layout", (c) => {
 });
 
 app.post("/kg/layout", async (c) => {
-  const body = await c
-    .req.json<{ positions: { nodeId: string; x: number; y: number }[] }>()
+  const body = await c.req
+    .json<{ positions: { nodeId: string; x: number; y: number }[] }>()
     .catch(() => null);
   if (!body || !Array.isArray(body.positions)) {
     return c.json({ error: "positions array required" }, 400);
   }
   const valid = body.positions.filter(
-    (p) =>
-      typeof p.nodeId === "string" &&
-      Number.isFinite(p.x) &&
-      Number.isFinite(p.y),
+    (p) => typeof p.nodeId === "string" && Number.isFinite(p.x) && Number.isFinite(p.y),
   );
   kg.saveLayout(valid);
   return c.json({ ok: true, saved: valid.length });

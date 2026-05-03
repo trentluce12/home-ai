@@ -173,17 +173,14 @@ export function GraphView({ open, onClose, refreshKey }: Props) {
 
     sigma.setSetting("nodeReducer", (node, attr) => {
       if (!hoveredNode) return attr;
-      const isFocus =
-        node === hoveredNode || graph.neighbors(hoveredNode).includes(node);
+      const isFocus = node === hoveredNode || graph.neighbors(hoveredNode).includes(node);
       return isFocus ? attr : { ...attr, color: "#27272a", label: "" };
     });
     sigma.setSetting("edgeReducer", (edge, attr) => {
       if (!hoveredNode) return attr;
       const [s, t] = graph.extremities(edge);
       const involves = s === hoveredNode || t === hoveredNode;
-      return involves
-        ? { ...attr, color: "#71717a" }
-        : { ...attr, hidden: true };
+      return involves ? { ...attr, color: "#71717a" } : { ...attr, hidden: true };
     });
 
     // If we restored a saved layout, run FA2 only weakly (or not at all) so
@@ -253,7 +250,10 @@ export function GraphView({ open, onClose, refreshKey }: Props) {
     if (typeof x !== "number" || typeof y !== "number") return;
     const camera = sigma.getCamera();
     camera.animate({ x, y, ratio: 0.3 }, { duration: 400 });
-    api.nodeDetail(id).then(setSelectedDetail).catch(() => undefined);
+    api
+      .nodeDetail(id)
+      .then(setSelectedDetail)
+      .catch(() => undefined);
     setSearchQuery("");
   }
 
@@ -410,9 +410,7 @@ function NodeDetailPanel({
     <aside className="absolute right-4 top-28 bottom-4 z-10 flex w-80 flex-col overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950/95 shadow-2xl backdrop-blur animate-fade-in">
       <header className="flex items-start justify-between gap-2 border-b border-zinc-900 px-4 py-3">
         <div className="min-w-0">
-          <p className="truncate text-sm font-medium text-zinc-100">
-            {detail.node.name}
-          </p>
+          <p className="truncate text-sm font-medium text-zinc-100">{detail.node.name}</p>
           <div className="mt-1 flex items-center gap-1.5">
             <span
               className="h-2 w-2 rounded-full"

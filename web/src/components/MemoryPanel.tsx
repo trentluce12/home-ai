@@ -1,11 +1,6 @@
 import { useState } from "react";
 import { Brain, ChevronDown, ChevronRight } from "lucide-react";
-import type {
-  ContextEvent,
-  DoneEvent,
-  MemoryEvent,
-  ToolEvent,
-} from "../lib/api";
+import type { ContextEvent, DoneEvent, MemoryEvent, ToolEvent } from "../lib/api";
 
 export function MemoryPanel({ events }: { events: MemoryEvent[] }) {
   const totals = computeTotals(events);
@@ -26,7 +21,8 @@ export function MemoryPanel({ events }: { events: MemoryEvent[] }) {
         ) : (
           <ul className="flex flex-col gap-1.5">
             {events.map((ev) => {
-              if (ev.kind === "context") return <ContextEventCard key={ev.id} event={ev} />;
+              if (ev.kind === "context")
+                return <ContextEventCard key={ev.id} event={ev} />;
               if (ev.kind === "done") return <DoneEventCard key={ev.id} event={ev} />;
               return <ToolEventCard key={ev.id} event={ev} />;
             })}
@@ -52,8 +48,7 @@ function ContextEventCard({ event }: { event: ContextEvent }) {
   const [expanded, setExpanded] = useState(false);
   const summary =
     event.rootNames.length > 0
-      ? event.rootNames.slice(0, 3).join(", ") +
-        (event.rootNames.length > 3 ? "…" : "")
+      ? event.rootNames.slice(0, 3).join(", ") + (event.rootNames.length > 3 ? "…" : "")
       : "no matches";
   const hasFormatted = event.formatted.length > 0;
   return (
@@ -112,7 +107,10 @@ function ToolEventCard({ event }: { event: ToolEvent }) {
 
 function DoneEventCard({ event }: { event: DoneEvent }) {
   const total =
-    event.inputTokens + event.outputTokens + event.cacheReadTokens + event.cacheCreateTokens;
+    event.inputTokens +
+    event.outputTokens +
+    event.cacheReadTokens +
+    event.cacheCreateTokens;
   const cachedPct = total > 0 ? Math.round((event.cacheReadTokens / total) * 100) : 0;
   return (
     <li className="px-2.5 py-1 animate-fade-in">

@@ -1,0 +1,11 @@
+node_modules
+dist
+build
+data
+*.tsbuildinfo
+package-lock.json
+
+# Prose: docs and task files are hand-formatted (intentional line breaks,
+# `*emphasis*` style, etc.). Prettier's markdown reformat would create high
+# churn for low value.
+*.md
