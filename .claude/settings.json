@@ -46,6 +46,16 @@
           }
         ]
       }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/scripts/check-stale-tasks.mjs"
+          }
+        ]
+      }
     ]
   }
 }
