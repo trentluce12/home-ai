@@ -94,8 +94,15 @@ export interface NodeDetail {
   provenance: { source: string; sourceRef: string | null; createdAt: number }[];
 }
 
+// `credentials: "include"` is required so the browser sends/receives the
+// `home_ai_session` cookie cross-origin in dev (Vite :5173 → server :3001).
+// In prod the SPA is same-origin so it's a no-op there. Always set so callers
+// don't have to care about the deployment shape.
 async function jsonFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${SERVER_URL}${path}`, init);
+  const res = await fetch(`${SERVER_URL}${path}`, {
+    credentials: "include",
+    ...init,
+  });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(`${res.status} ${res.statusText}${text ? ` — ${text}` : ""}`);
@@ -103,7 +110,45 @@ async function jsonFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+export interface AuthMeResponse {
+  authenticated: boolean;
+}
+
+/**
+ * Login response shape. Server returns `{ ok: true }` on success; on failure
+ * we throw with the status, which the caller distinguishes (401 vs 429 vs 500)
+ * to pick the right user-facing copy.
+ */
+export class LoginError extends Error {
+  constructor(
+    public status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "LoginError";
+  }
+}
+
 export const api = {
+  me: () => jsonFetch<AuthMeResponse>("/api/auth/me"),
+  login: async (password: string): Promise<void> => {
+    const res = await fetch(`${SERVER_URL}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ password }),
+    });
+    if (!res.ok) {
+      // Don't surface response text — both unconfigured-server (500) and
+      // wrong-password (401) should look like a failed login from the
+      // user's POV. Caller picks copy off the status alone.
+      throw new LoginError(res.status, `Login failed (${res.status})`);
+    }
+  },
+  logout: () =>
+    jsonFetch<{ ok: true }>("/api/auth/logout", {
+      method: "POST",
+    }),
   listSessions: () => jsonFetch<SessionSummary[]>("/api/sessions"),
   sessionHistory: (id: string) => jsonFetch<Message[]>(`/api/sessions/${id}/history`),
   deleteSession: (id: string) =>

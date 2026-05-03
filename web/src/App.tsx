@@ -1,15 +1,50 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { ArrowDown, ArrowUp, Network, Square } from "lucide-react";
+import { ArrowDown, ArrowUp, LogOut, Network, Square } from "lucide-react";
 import { MessageBubble } from "./components/MessageBubble";
 import { MemoryPanel } from "./components/MemoryPanel";
 import { SessionList } from "./components/SessionList";
 import { EmptyDashboard } from "./components/EmptyDashboard";
 import { GraphView } from "./components/GraphView";
+import { Login } from "./components/Login";
 import { api, SERVER_URL, type Message, type MemoryEvent } from "./lib/api";
 
 const NEAR_BOTTOM_PX = 80;
 
+type AuthState = "checking" | "anon" | "authed";
+
 export default function App() {
+  const [authState, setAuthState] = useState<AuthState>("checking");
+
+  // One-shot probe on mount to decide whether to render <Login /> or the
+  // full app shell. We treat any failure (network, 401, 5xx) as "anon" so
+  // the user lands on the login screen rather than a stuck loading state.
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .me()
+      .then((res) => {
+        if (!cancelled) setAuthState(res.authenticated ? "authed" : "anon");
+      })
+      .catch(() => {
+        if (!cancelled) setAuthState("anon");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (authState === "checking") {
+    // Brief loading state. A blank dark page for ~50ms is fine and won't
+    // flash a login form before the cookie probe resolves.
+    return <div className="h-dvh bg-zinc-950" />;
+  }
+  if (authState === "anon") {
+    return <Login onSuccess={() => setAuthState("authed")} />;
+  }
+  return <ChatShell onLogout={() => setAuthState("anon")} />;
+}
+
+function ChatShell({ onLogout }: { onLogout: () => void }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [memoryEvents, setMemoryEvents] = useState<MemoryEvent[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -111,6 +146,7 @@ export default function App() {
       const response = await fetch(`${SERVER_URL}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({ message: trimmed, sessionId }),
         signal: controller.signal,
       });
@@ -231,6 +267,17 @@ export default function App() {
     }
   }
 
+  async function handleLogout() {
+    if (streaming) abortRef.current?.abort();
+    try {
+      await api.logout();
+    } catch {
+      // The cookie may have already expired server-side; either way we
+      // drop the user back to the login screen so they can re-auth.
+    }
+    onLogout();
+  }
+
   const empty = messages.length === 0;
 
   return (
@@ -252,6 +299,14 @@ export default function App() {
             className="flex h-7 w-7 items-center justify-center rounded text-zinc-400 transition hover:bg-zinc-900 hover:text-zinc-100"
           >
             <Network className="h-3.5 w-3.5" />
+          </button>
+          <button
+            onClick={handleLogout}
+            aria-label="log out"
+            title="Log out"
+            className="flex h-7 w-7 items-center justify-center rounded text-zinc-400 transition hover:bg-zinc-900 hover:text-zinc-100"
+          >
+            <LogOut className="h-3.5 w-3.5" />
           </button>
         </div>
       </header>
