@@ -114,6 +114,6 @@ Phased like M4 — three phases, six stories tracked in `tasks/planned/`.
 - [x] `m5p2-approval-modal` — SSE `approval_request` event + response endpoint + reusable Approve/Deny/Tweak modal infrastructure.
 - [x] `m5p2-propose-note-edit` — first consumer: agent rewrites notes through the modal (before/after diff render, applies on approve, returns `tweakText` to the agent loop on tweak).
 
-### Phase 3 — node merge (planned)
+### Phase 3 — node merge (shipped ✓)
 
-- [ ] `m5p3-propose-node-merge` — collapse N duplicate nodes into 1 (edges deduped, body unified, embeddings regenerated, provenance rewritten, source nodes dropped) in one transaction. Most complex tool; lands on its own.
+- [x] `m5p3-propose-node-merge` — collapse N duplicate nodes into 1 (edges deduped, body unified, embeddings regenerated, provenance rewritten, source nodes dropped) in one transaction. Most complex tool; lands on its own.

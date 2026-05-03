@@ -12,6 +12,20 @@ A personal AI: streaming chat UI on top of the Anthropic API. Knowledge graph co
 
 Newest first. Append entries; don't edit history.
 
+### 2026-05-03 · M5 phase 3 — `propose_node_merge` shipped (M5 closed)
+
+Final M5 story. `mergeNodes(sourceIds, target)` in `server/src/kg/db.ts` runs in a single transaction: rewrite each source's outgoing/incoming edges to point at target with `(other_end, edge_type)` dedup, drop self-loops introduced by rewriting, migrate per-node provenance rows to target with `source_ref = "merged_from_<sourceId>"`, overwrite `node_notes(target.id)` verbatim with `target.body`, then delete source nodes (FK cascade clears their edges/embeddings/notes/remaining provenance). Re-embed target in the background — same posture as `record_user_fact`. The `mcp__kg__propose_node_merge(source_ids, target)` tool builds a `{kind:"node_merge", sources:[{node, edges, note}...], target}` payload and blocks on `requestApproval(...)`; the modal renders source cards (each with edge list + note preview) above a read-only target preview. Approve → `mergeNodes(...)`; Deny → no-op; Tweak → JSON-stringified `{decision:"tweak", tweakText}` so the agent can re-propose with the user's guidance.
+
+Two judgement calls worth pinning:
+
+**Target match resolution.** When `target.name`+`target.type` matches an *existing non-source* node, that node is reused as the merge target instead of minting a new one. Cleaner mental model: merging into a canonical node the user already has (`Topic:React`) is the common case when the agent proposes consolidating fuzzier duplicates (`Topic:react`, `Topic:reactjs`). When no non-source match exists, a fresh node is minted — even if a source happens to share the target name+type, since deleting+recreating the same id would be messy. `targetCreated: boolean` in the result distinguishes the two paths so callers can log differently.
+
+**Provenance `source_ref` is overwritten, not concatenated.** When migrating a source's per-node provenance row to the target, `source_ref` becomes `"merged_from_<sourceId>"` regardless of any prior value. If the source had a meaningful prior `source_ref`, it's lost. Multi-step merges (A→B then B→C) would otherwise produce nested concatenation strings that are gnarly to parse. The `merge_target(...)` provenance row appended to the target carries the explicit source list, so the high-level lineage stays recoverable; the per-edge prior-`source_ref` history is the casualty.
+
+System prompt gained a `MERGING DUPLICATE NODES` section: only propose for *genuine* duplicates (semantic + same-type), pick the canonical name (capitalized over lowercase, full over abbreviation), include a clear `reason`, ask the user before proposing if uncertainty is high. The phrasing leans conservative: false-merge cleanup is more painful than waiting another turn.
+
+M5 closed: notes baseline (phase 1) + approval modal infra and first consumer (phase 2) + node merge (phase 3). The approval modal now has two real payload-kind renderers (`note_edit`, `node_merge`); future tools (no concrete plans yet) can plug in via the same `kind`-keyed dispatch.
+
 ### 2026-05-03 · M5 phase 2 — `propose_note_edit` shipped
 
 First real consumer of the approval modal. Agent calls `mcp__kg__propose_note_edit(nodeId, newBody, reason)`; the tool fetches the current body via `getNote`, builds a `{kind:"note_edit", node:{id,name,type}, before, after, reason}` payload, and blocks on `requestApproval(...)`. On approve it writes via `setNote` and returns `applied — note on … updated at …`. On deny it returns `denied by user`. On tweak it returns `{"decision":"tweak","tweakText":…}` (JSON-stringified) so the agent loop sees the tweak structurally and can re-propose. On timeout it returns a soft message telling the agent to ask the user before retrying.
