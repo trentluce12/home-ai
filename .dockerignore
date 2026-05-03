@@ -1,0 +1,46 @@
+# Dependencies — installed fresh inside the builder stage.
+node_modules
+**/node_modules
+
+# Build artifacts — produced inside the builder stage, never copied from host.
+dist
+**/dist
+build
+**/build
+*.tsbuildinfo
+
+# Local env — secrets stay out of the image. Compose injects via env_file.
+.env
+.env.*
+!.env.example
+
+# Local data — the prod image gets a fresh /data volume.
+data
+**/*.sqlite
+**/*.sqlite-wal
+**/*.sqlite-shm
+
+# VCS + tooling.
+.git
+.gitignore
+.github
+.vscode
+.idea
+.claude
+
+# Project meta — not needed at runtime.
+docs
+tasks
+README.md
+LICENSE
+
+# Logs + OS junk.
+*.log
+.DS_Store
+Thumbs.db
+
+# Docker config itself — building from the image of the image is silly.
+Dockerfile
+.dockerignore
+docker-compose.yml
+docker-compose.*.yml

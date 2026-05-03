@@ -1,0 +1,39 @@
+# Local prod-shape testing. Mirror the production deploy posture: read-only
+# root FS, /data the only writable mount, no host docker socket, no host
+# network. Compose wires a fresh named volume so the dev SQLite isn't shared.
+
+services:
+  home-ai:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: home-ai:local
+    container_name: home-ai
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: 8080
+    ports:
+      - "8080:8080"
+    volumes:
+      - home-ai-data:/data
+    read_only: true
+    tmpfs:
+      # Node + npm scratch. Keeps root FS read-only without breaking writes
+      # to OS-standard temp paths.
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://localhost:8080/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  home-ai-data:
