@@ -109,10 +109,10 @@ Phased like M4 — three phases, six stories tracked in `tasks/planned/`.
 - [x] `m5p1-notes-panel` — top-level "Notes" surface in the empty-state dashboard (flat list of nodes with notes; click → opens detail panel).
 - [x] `m5p1-notes-retrieval` — `notePreview` snippet alongside retrieved nodes + `mcp__kg__get_node_note` tool for full body.
 
-### Phase 2 — approval modal + agent edits (planned)
+### Phase 2 — approval modal + agent edits (shipped ✓)
 
-- [ ] `m5p2-approval-modal` — SSE `approval_request` event + response endpoint + reusable Approve/Deny/Tweak modal infrastructure.
-- [ ] `m5p2-propose-note-edit` — first consumer: agent rewrites notes through the modal.
+- [x] `m5p2-approval-modal` — SSE `approval_request` event + response endpoint + reusable Approve/Deny/Tweak modal infrastructure.
+- [x] `m5p2-propose-note-edit` — first consumer: agent rewrites notes through the modal (before/after diff render, applies on approve, returns `tweakText` to the agent loop on tweak).
 
 ### Phase 3 — node merge (planned)
 

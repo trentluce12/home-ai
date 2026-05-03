@@ -12,6 +12,22 @@ A personal AI: streaming chat UI on top of the Anthropic API. Knowledge graph co
 
 Newest first. Append entries; don't edit history.
 
+### 2026-05-03 · M5 phase 2 — `propose_note_edit` shipped
+
+First real consumer of the approval modal. Agent calls `mcp__kg__propose_note_edit(nodeId, newBody, reason)`; the tool fetches the current body via `getNote`, builds a `{kind:"note_edit", node:{id,name,type}, before, after, reason}` payload, and blocks on `requestApproval(...)`. On approve it writes via `setNote` and returns `applied — note on … updated at …`. On deny it returns `denied by user`. On tweak it returns `{"decision":"tweak","tweakText":…}` (JSON-stringified) so the agent loop sees the tweak structurally and can re-propose. On timeout it returns a soft message telling the agent to ask the user before retrying.
+
+Three judgement calls:
+
+**No-op short-circuit.** If `before === args.newBody`, return immediately without bothering the user with a no-change diff. The agent occasionally re-proposes verbatim during multi-turn flows; this keeps the modal honest.
+
+**Tweak return shape is structured, not prose.** Returning `{"decision":"tweak","tweakText":"…"}` (rather than just the prose) lets the agent disambiguate "user asked for an adjustment" from "user added free-form chat context." The agent reads the JSON, integrates the guidance, and calls `propose_note_edit` again with a tightened body — the loop stays explicit.
+
+**Modal widens to `max-w-3xl` when `kind === "note_edit"`.** The default `max-w-lg` is fine for JSON dumps but cramped for a side-by-side markdown diff. Conditional based on payload kind so future tools (`node_merge` next) can pick their own width without coupling. Both before/after blocks render through `react-markdown` + `remark-gfm` with a local `NOTE_DIFF_PROSE` palette mirroring the panel editor's prose styling — empty `before` shows a `(empty)` placeholder for the rare case where a node's note was deleted between the agent's read and its proposal.
+
+System prompt gained an `EDITING NODE NOTES` section: complete-body-not-diff, read first via `mcp__kg__get_node_note` if unsure what to preserve, keep the `reason` specific (one short sentence), don't loop forever on tweak, don't propose blind for nodes without an existing note. The latter is intentional out-of-scope: agent-creating a note from scratch is the manual editor's role; the propose-edit gate is for *changing* something the user already curated.
+
+Phase 2 closed: approval modal infra (`m5p2-approval-modal`) + first consumer (`m5p2-propose-note-edit`) both shipped. Phase 3 (`m5p3-propose-node-merge`) is next; it'll add a second `kind` to the modal's payload dispatch.
+
 ### 2026-05-03 · M5 — node-attached notes layer
 
 M5 layers free-form markdown notes onto existing KG nodes alongside the structured edges. Notes carry the long-form context that doesn't fit edge form (a person's anecdote, a project's evolving readme, a topic's nuances) without abandoning the graph as the organizing spine.
