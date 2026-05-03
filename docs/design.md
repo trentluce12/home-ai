@@ -12,6 +12,47 @@ A personal AI: streaming chat UI on top of the Anthropic API. Knowledge graph co
 
 Newest first. Append entries; don't edit history.
 
+### 2026-05-02 · `.claude/` workflow hardening — 6-area design
+
+Started this session intending to nail down a structured way of working on home-ai. Too much had been emerging ad-hoc: the task lifecycle was half-defined, `/task-start` did less than its name implied, the ralph-loop pitch existed but had no infrastructure, and rules like "never commit on main" were user-vigilance rather than enforced. Designed across six areas and queued the build-out as 18 task files in `tasks/planned/`.
+
+**Foundation: tool taxonomy.** Before adding anything to `.claude/`, locked in what each tool *is for* — to prevent overlap (e.g., "is this a command or a subagent?"):
+
+- **Slash command** — explicit user verb; templated workflow; `/x` invocation
+- **Subagent** — encapsulated specialist work that benefits from isolation (fresh context, focused prompt)
+- **Skill** — context-dependent expertise auto-loaded when triggers match
+- **Main thread** — synthesis, decisions, anything needing full conversation context
+- **Hook** — event-driven enforcement, runs outside Claude's reasoning
+
+**Area 1 — agents / commands / lifecycle.** The `story-implementer` subagent gets a real contract: pre-flight overlap check (defensive, area 5), `npm run typecheck` + `lint` + `format:check` + grep-for-new-TODO/console.log/debugger gates with a 3-attempt retry cap, Status/Started/Notes management on the task file, fail-loud principle (don't silently work around). Three new subagents to build: `story-planner` (file-disjoint batch picker, sonnet, read-only), `bug-hunter` (root-cause analysis, opus, doesn't fix unless told), `refactorer` (mechanical multi-file changes, opus, behavior-preservation guarantee). Seven new slash commands to round out the workflow: `/task-batch`, `/task-status`, `/task-revert`, `/bug`, `/refactor`, `/design-log`, `/seed-fact`. New task-file format adds `Status` / `Started` / `Notes` / `Dependencies` / `Smoke steps` fields; `---` separates user-authored from agent-managed sections. Naming convention formalized: `m<N>[p<K>]-`, `bug-`, `refactor-`, `chore-`, `spike-`. Dependency-aware `/task-start` refuses to claim a task whose deps are still pending.
+
+**Area 2 — coding rules → skills.** Original lean was `docs/conventions/*.md` (always-loaded docs); switched to `.claude/skills/` so they auto-load only when triggers match — smaller per-session context, cleaner separation from architecture docs. Six project-scoped skills: `typescript`, `hono`, `react`, `tailwind`, `anthropic-sdk` (project layer on top of the global `claude-api` skill), `sqlite`. Triggers are file paths or imports — e.g., `sqlite` loads when editing files that import `better-sqlite3`. Git rules get a dedicated CLAUDE.md section + a hook (area 4) for the never-main rule. MCPs stay none for now — the in-process KG tools work fine; an MCP layer would be complexity for no benefit.
+
+**Area 3 — improvement lifecycle.** Formalized when to add (3-retype rule / 3-step workflow / single recurring error class), when to revise (2+ contract violations in real use — single failures are noise), and when to deprecate (per-milestone audit; 60+ days untouched + no codebase refs → candidate for removal, never auto-deleted). Versioning is rolling-edit; git history is the version log. Design log entries required for non-trivial `.claude/` changes — this entry qualifies. Audit cadence is per-milestone (not time-based — milestone closure is the natural reflection point) via a new `/audit-claude-folder` command that produces a fresh `chore-audit-claude-folder-<date>.md` task with findings (queue-tracked, not ephemeral). Cross-pollination with `~/.claude/`: stay project-only by default; promote globally only if a 2nd project would actually use the thing.
+
+**Area 4 — settings + hooks.** Hook scripts live in `.claude/scripts/` as Node `.mjs` files — truly cross-platform (works on Windows + Mac + Linux without bash-vs-PowerShell drama). Two initial hooks: `SessionStart` for stale-task detection (warns about `/in-progress/` files older than 1h — likely orphans from crashed agents); `PreToolUse` on `Bash` to block `git commit` when HEAD = main. Failure semantics: `PreToolUse` non-zero exit **blocks** the tool call (intentional — that's how the blocker works); `SessionStart` non-zero **logs to stderr but doesn't crash** the session (a missing warning isn't worth bricking the session). `settings.json` committed (project-wide policy + hook configs); `settings.local.json` gitignored (per-user permission allowlists). M4.5 production tool-narrowing happens at the Agent SDK layer in `server/src/index.ts`, not in the harness — different concerns, kept separate.
+
+**Area 5 — multi-agent coordination.** Worktrees + file-disjoint planning, both. Worktrees (harness-provided via `isolation: "worktree"`) give true experimental isolation; file-disjoint planning by `story-planner` makes the diff-back-to-`dev-tl` step mechanical (no merge conflicts). Cap at 5 parallel agents — arbitrary but reasonable for personal-project scale and Claude API budget. Failure containment: one agent failing doesn't abort the batch; others continue, failed task lands in `/in-progress` with `Status: blocked` for human triage. Defense-in-depth: `story-implementer` cross-checks `tasks/in-progress/` for `**Files:**` overlap before starting (catches manual `/task-start` during a ralph batch). Commit-as-each-finishes by default; can defer to batch-review later if it gets noisy. Lock model: the file move (`/planned` → `/in-progress`) is the lock; nothing else picks up a claimed task.
+
+**Area 6 — communication conventions.** Codified what was emerging organically: brief by default for conversational, structured-but-as-long-as-needed for design discussions, tight bullets for status reports (what changed / verified / next; never narrate tool calls). Ask vs decide gates on reversibility + state-impact + scope ambiguity. Single targeted clarifying question when unclear — never a wall of questions. Push back with reason when the user is wrong about something concrete (factual, not preference) — don't capitulate to be agreeable. Defer when it's preference vs preference. File refs always use `path/file.ts:42` format (clickable in the harness). Honest about uncertainty (state assumptions, don't fake confidence). No emojis unless asked.
+
+**Outputs.**
+
+- 18 new task files in `tasks/planned/` (10 area 1 + 7 area 2 + 1 area 3); areas 4–6 produced edits, not new tasks
+- One umbrella task (`chore-update-claude-md`) consolidates all 6 areas' policy into the project's entry-point doc — depends on basically everything else, ships last
+- Two previously-blocked tasks (`chore-stale-task-detection`, `chore-prevent-main-commits`) unblocked by the area-4 hook design
+- Removed `Skills (.claude/skills/)` and `Hooks` from CLAUDE.md's "don't add until needed" list — past those gates now
+
+**What's not in scope (intentionally).**
+
+- Auto-delete of stale entries (audit surfaces; human decides)
+- Time-based audit cadence (per-milestone instead — natural reflection point)
+- Metrics / observability (defer until there's a reason to optimize)
+- Promoting project skills to global `~/.claude/` until a 2nd project would actually use them
+- Sub-subagent hierarchies (story-implementer doesn't spawn its own helpers — keeps the model simple)
+
+**Suggested implementation order.** `chore-lint-format` first (foundation for the gates). Then ralph the 6 skill tasks + 3 subagent tasks once `story-planner` ships and `/task-batch` is wired up. Save `chore-update-claude-md` for last — it's the consolidator.
+
 ### 2026-05-01 · M4.5 — production deployment + auth (design, not yet built)
 
 home-ai is moving from "localhost on my dev machine" to "Docker container + persistent volume on a machine I host, reachable from anywhere." Two things that the localhost setup hides become blocking-before-ship: there is no auth, and the agent's tool surface (Bash + Write + Edit + Read + Glob + Grep + WebFetch + WebSearch) is effectively remote code execution on a public URL. M4.5 closes that gap before M5 (notes layer) so we never accumulate sensitive data on an unauthed deployment.
