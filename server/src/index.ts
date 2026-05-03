@@ -1,7 +1,8 @@
 import { config } from "dotenv";
 import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
+import { dirname, relative, resolve } from "node:path";
 import { serve } from "@hono/node-server";
+import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { streamSSE } from "hono/streaming";
@@ -602,7 +603,41 @@ app.get("/api/kg/export", (c) => {
   });
 });
 
-app.get("/", (c) => c.text("home-ai server"));
+// ───────── Static SPA serving ─────────
+//
+// In single-origin prod, Hono serves the built web bundle at `/` (and its
+// asset paths). This MUST be mounted after every `/api/*` route above so
+// Hono's top-to-bottom matcher hits the API handlers first — otherwise the
+// static catch-all would shadow them.
+//
+// `serveStatic`'s `root` is resolved relative to `process.cwd()` (absolute
+// paths are explicitly unsupported per the upstream README). cwd differs
+// between dev (`server/` — npm workspaces cd into the workspace dir) and
+// prod (the container root, where the Dockerfile's `node server/dist/index.js`
+// entrypoint runs). Computing the path via `path.relative` against the
+// already-resolved `PROJECT_DIR` makes both work without a side-effecting
+// `process.chdir`.
+//
+// Missing `web/dist` (i.e. `vite build` hasn't run yet in dev) is non-fatal —
+// `serveStatic` logs a warning at startup and 404s on each request, which
+// then falls through to the SPA fallback below; that 404s too. Acceptable in
+// dev where the SPA is served by Vite on :5173 anyway.
+const WEB_DIST_DIR = resolve(PROJECT_DIR, "web/dist");
+const WEB_DIST_RELATIVE = relative(process.cwd(), WEB_DIST_DIR) || ".";
+const WEB_DIST_INDEX_RELATIVE = relative(
+  process.cwd(),
+  resolve(WEB_DIST_DIR, "index.html"),
+);
+
+app.use("*", serveStatic({ root: WEB_DIST_RELATIVE }));
+// SPA fallback: any non-`/api/*` path that didn't match a real file gets
+// `index.html`, so client-side routes (e.g. `/login`) hydrate correctly.
+// Explicitly skip `/api/*` — an authed request to a non-existent API route
+// should 404, not silently swallow the path and return the SPA.
+app.get("*", async (c, next) => {
+  if (c.req.path.startsWith("/api/")) return next();
+  return serveStatic({ path: WEB_DIST_INDEX_RELATIVE })(c, next);
+});
 
 const port = Number(process.env.PORT) || 3001;
 serve({ fetch: app.fetch, port }, (info) => {
