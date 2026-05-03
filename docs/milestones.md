@@ -117,3 +117,30 @@ Phased like M4 — three phases, six stories tracked in `tasks/planned/`.
 ### Phase 3 — node merge (shipped ✓)
 
 - [x] `m5p3-propose-node-merge` — collapse N duplicate nodes into 1 (edges deduped, body unified, embeddings regenerated, provenance rewritten, source nodes dropped) in one transaction. Most complex tool; lands on its own.
+
+## M6 — Knowledge sidebar (planned)
+
+A layout + organization pass on top of M5. The left sidebar reorganizes into `Agents` (chats) and `Knowledge` (Notes / Knowledge Graph) sections; notes get a folder-tree-organized browse surface (VSCode explorer ergonomics) with notes parented in user-defined folders; the underlying KG nodes-and-edges substrate stays untouched (folders are pure UI). Graph view demotes from header-modal to inline main-panel view; the right-side memory panel demotes from always-visible to contextual chat-only. Notes get their own `name` independent of the underlying node, and a new `Generic` entity type lands as the default for inline-created notes. Design landed 2026-05-03 in `docs/design.md`.
+
+Phased — four phases, tasks tracked in `tasks/planned/`.
+
+### Phase 1 — layout reshuffle (planned)
+
+- [ ] `m6p1-sidebar-sections` — restructure left sidebar with `Agents` + `Knowledge` collapsible sections; chats move under Agents; Notes / Knowledge Graph buttons under Knowledge; header `Network` icon retires.
+- [ ] `m6p1-memory-contextual` — demote memory panel to chat-only with slide-in + resizable drag handle + collapsible close button; persist collapsed state across sessions.
+
+### Phase 2 — notes view + secondary sidebar (planned)
+
+- [ ] `m6p2-notes-view-shell` — secondary sidebar slides out when Notes is selected (flat list, no hierarchy yet); main-panel modes for preview-only + split editor/preview; `Edit` button toggles between them.
+- [ ] `m6p2-note-name-field` — add `name TEXT NOT NULL` column to `node_notes`; backfill existing rows with the node's name; surface the note's own name in tree / preview header / dashboard widget; rename decoupled from node-rename.
+- [ ] `m6p2-note-creation-flow` — VSCode-style inline note creation with `untitled` placeholder; new `Generic` entity type added to the taxonomy as the default for inline-created notes.
+
+### Phase 3 — folder data model + CRUD (planned)
+
+- [ ] `m6p3-folder-schema` — `note_folders(id, name, parent_id NULL, sort_order)` table; `folder_id NULL FK` on `node_notes`; tree state persistence.
+- [ ] `m6p3-folder-crud` — context-sensitive right-click menu (Add subfolder / Add note / Rename / Delete on folders; Rename / Delete on notes; Add folder / Add note on empty space); inline rename via right-click; non-empty-delete prompt with move-to-unfiled default.
+- [ ] `m6p3-folder-dragdrop` — drag-and-drop notes between folders, folders into folders, drop to root for unfiled.
+
+### Phase 4 — graph view as main panel (planned)
+
+- [ ] `m6p4-graph-inline` — move graph from header-modal to inline main-panel view; bigger detail panel by default; note section is preview-only with an `Edit` button that navigates to the Notes view, expands the tree, and opens the note in split-edit mode.

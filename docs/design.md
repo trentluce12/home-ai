@@ -12,6 +12,54 @@ A personal AI: streaming chat UI on top of the Anthropic API. Knowledge graph co
 
 Newest first. Append entries; don't edit history.
 
+### 2026-05-03 · M6 — Knowledge sidebar (planned)
+
+A layout + organization pass on top of M5. The motivating problem: notes are powerful but have no native browse surface — the only way to add or find one is to navigate to its node in the graph modal. Folders have no place in the structured KG, but as a UI organization layer over the user's notes, they're exactly what's missing. M6 introduces a `Knowledge` section in the left sidebar with two views — Notes (folder-tree-organized) and Knowledge Graph (the existing Sigma surface, demoted from header-modal to inline main-panel view).
+
+**Sidebar restructure.** Left sidebar gains two collapsible sections — `Agents` (the existing chat list moves here) and `Knowledge` (`Notes` / `Knowledge Graph` buttons). The header `Network` icon retires; the graph entry point lives in the sidebar.
+
+**Memory panel demoted.** The right-side memory panel is contextual: hidden by default, slides in when the user is viewing an active chat, dismissible (close button), resizable (drag handle), persists collapsed state across sessions. Reading room comes back when the user isn't actively chatting.
+
+**Notes view + secondary sidebar.** Selecting `Notes` slides a secondary sidebar out from the left edge of the primary nav, holding the folder tree. Tree mechanics mirror VSCode's explorer:
+
+- **Click** a folder → expand/collapse. Click a note → opens it in the main panel (preview-only).
+- **Right-click** menu, contextual to what was right-clicked:
+  - On a folder: `Add subfolder`, `Add note`, `Rename`, `Delete`.
+  - On a note: `Rename`, `Delete`.
+  - On empty space: `Add folder`, `Add note` (creates at root / unfiled).
+- **Drag-and-drop** moves notes between folders, re-nests folders, and drops to root for unfiled.
+- **Inline create** — new notes/folders appear with an editable `untitled` placeholder; user types the name and presses Enter to commit.
+- Top-level expanded by default; deeper levels collapsed; tree state persists across sessions.
+
+**Main-panel modes** — context-sensitive, depending on what's selected:
+
+- `Notes` active, no specific note → notes-context dashboard (recent notes panel + relevant widgets; the existing dashboard's `Notes` panel stays — it's the "recent" surface, the secondary sidebar is the "browse all" surface).
+- Specific note selected → preview-only render of the body. An `Edit` button on the preview switches to a split view: editor on the left, live preview on the right.
+- Active chat → chat UI; memory panel auto-opens to the right.
+- `Knowledge Graph` selected → graph view inline (no longer a modal).
+
+The empty-state dashboard's widget set is **context-sensitive**: notes-context emphasizes recent notes / note-related stats; agents-context (entered with no chat selected) keeps the kitchen-sink KG widgets (stats, recent nodes, forget, export, import).
+
+**Folder data model — pure UI layer.** New `note_folders(id, name, parent_id NULL FK self, sort_order INTEGER)` table; `node_notes` gains a `folder_id NULL FK` column (`NULL` = unfiled root). Folders carry no edges, no embeddings, no provenance — they're opaque to the agent (`propose_note_edit` doesn't see them; retrieval doesn't see them). Deleting a non-empty folder prompts: move-to-unfiled (default) or delete-contents. Notes never become collateral damage from a folder action unless the user explicitly chooses delete-contents.
+
+**Notes get a name independent of the underlying node.** Renaming a note in the tree does NOT rename the underlying node (and vice versa). `node_notes` gains a `name TEXT NOT NULL` column. Two human-facing labels exist:
+
+- The **note's own** `name` — shown in the tree, in the preview header, in the dashboard's recent-notes widget. Renamed via the tree's right-click `Rename`.
+- The **underlying node's** `name` — shown in the graph view and in the agent's retrieval context. Renamed via the graph-view detail panel or by an agent tool call.
+
+At creation time the two start in lockstep: if the user types `Birthday party 2026` to create a note inline, both the note and the new `Generic`-typed node get that name. They drift only if the user explicitly renames one independently. For notes created the existing way (open a node's detail panel, start typing the body), the note `name` defaults to the node's name.
+
+**`Generic` entity type.** New top-level type alongside `Person` / `Pet` / `Project` / `Topic` / `Organization` / `Place` / etc. Used as the default type when a user creates a note inline from the tree (no other typing context available). `Generic`-typed nodes show in the graph view by default — they're not filtered out — so newly-jotted notes are visible as part of the user's KG until upgraded. The user upgrades a `Generic` node's type from the graph-view detail panel when the note's subject is concrete enough to fit a real type.
+
+**Graph view becomes a main-panel view.** No more header modal. Selected from `Knowledge → Knowledge Graph`. The detail panel that opens when a node is clicked is bigger by default than the current modal version. The note section in the detail panel renders preview-only with an `Edit` button — clicking it navigates to the Notes view, expands the tree to the note's location, and opens it in split-edit mode. The graph and the chat can no longer be open simultaneously (the user flips between via the sidebar) — acceptable; the modal pattern was a quick hack and the inline pattern is cleaner.
+
+**Phase breakdown** (sequential — each phase ships independently):
+
+- **Phase 1 — layout reshuffle.** Sidebar gains `Agents` / `Knowledge` sections; memory panel demoted to contextual chat-only with slide-in + resize + collapse; header `Network` icon retires (graph entry moves to sidebar). The guts of Notes/Graph stay where they are — Notes is still attached per-node only, graph still has its current detail panel. Ships the new shell without changing how notes/graph work internally.
+- **Phase 2 — notes view + secondary sidebar (no folders yet).** Notes button shows the secondary sidebar with a flat list of all notes; preview-only mode with `Edit` → split editor/preview; VSCode-style inline note creation with `Generic` default type; `node_notes.name` column added (renames decoupled from node).
+- **Phase 3 — folder data model + CRUD.** `note_folders` table + `folder_id` column; right-click menu (Add subfolder / Add note / Rename / Delete); inline rename; drag-and-drop notes between folders and folders into folders; non-empty-delete prompt.
+- **Phase 4 — graph view as main panel.** Move graph from header-modal to inline main-panel view; bigger detail panel; preview-only note in detail panel + `Edit` button navigates to Notes view.
+
 ### 2026-05-03 · M5 phase 3 — `propose_node_merge` shipped (M5 closed)
 
 Final M5 story. `mergeNodes(sourceIds, target)` in `server/src/kg/db.ts` runs in a single transaction: rewrite each source's outgoing/incoming edges to point at target with `(other_end, edge_type)` dedup, drop self-loops introduced by rewriting, migrate per-node provenance rows to target with `source_ref = "merged_from_<sourceId>"`, overwrite `node_notes(target.id)` verbatim with `target.body`, then delete source nodes (FK cascade clears their edges/embeddings/notes/remaining provenance). Re-embed target in the background — same posture as `record_user_fact`. The `mcp__kg__propose_node_merge(source_ids, target)` tool builds a `{kind:"node_merge", sources:[{node, edges, note}...], target}` payload and blocks on `requestApproval(...)`; the modal renders source cards (each with edge list + note preview) above a read-only target preview. Approve → `mergeNodes(...)`; Deny → no-op; Tweak → JSON-stringified `{decision:"tweak", tweakText}` so the agent can re-propose with the user's guidance.
