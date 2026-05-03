@@ -12,6 +12,20 @@ A personal AI: streaming chat UI on top of the Anthropic API. Knowledge graph co
 
 Newest first. Append entries; don't edit history.
 
+### 2026-05-03 · JSON KG import — merge strategy + ID rewriting
+
+`m4p3-json-import` round-trips the existing `/api/kg/export` JSON. Three calls worth pinning:
+
+**Default merge skips on `(name, type)` collision; flag for replace-all.** Re-importing the same backup twice should be idempotent — adding a second copy of every node would silently double the graph. Skipping by `(name, type)` matches the FTS lookup key the rest of the system uses (`findNodeByName(name, type)`). Replace-all is opt-in via a checkbox + browser `confirm()` because it deletes everything first; without an explicit gate it's too easy to nuke a working KG by re-importing into the wrong target.
+
+**New IDs always; old IDs only used for edge wiring.** The export carries arbitrary `node_*` IDs that may collide with current rows (especially after a wipe/restore cycle that mints fresh IDs). Reusing them via `INSERT` would either fail on PK conflict or, worse, silently scribble onto unrelated rows. Instead we mint fresh IDs and build an old-id → new-id map; edges then resolve through the map. Edges whose endpoint maps to nothing (e.g., the snapshot is partial, or replace-all skipped a corrupt node row) are dropped with a count rather than failing the whole import — same posture as embedding failure: best-effort, count what you got.
+
+**One transaction wraps everything.** A bad row mid-snapshot rolls the whole import back. Implemented via `db.transaction(...)` (better-sqlite3's wrapper that re-throws on inner exception). Cheaper than chunking and gets us atomicity for free.
+
+**`bulk_import` added to `FACT_SOURCES`.** Provenance gains a fourth source alongside `user_statement | agent_inference | seed`. Lets a future "where did this fact come from?" UI distinguish backup-restored rows from organically-recorded ones, and lets the inferred-rule layer (when it lands) skip imported facts if needed.
+
+**Embeddings stay regenerable, not transmitted.** The export already strips them; the import re-runs `embedNodes` in the background after the SQL transaction commits. Failure is non-fatal — FTS still works, hybrid retrieval just skips the cosine pass for unembedded nodes until a future re-embed run catches them. Same posture as `record-fact`.
+
 ### 2026-05-02 · ESLint + Prettier across both workspaces
 
 `chore-lint-format` set up the gates the updated story-implementer contract will key off (`npm run lint`, `npm run format:check`). Stack: ESLint 9 flat config (`eslint.config.mjs` at the repo root), `@eslint/js` + `typescript-eslint` recommended, plus `eslint-plugin-react` + `eslint-plugin-react-hooks` scoped to `web/**`. Prettier 3 with a config that matches the existing house style (2 sp, double quotes, `printWidth: 90`, `endOfLine: "lf"`). `eslint-config-prettier` last in the rule chain so the two tools don't fight over layout. Per-workspace `lint`/`lint:fix`/`format`/`format:check` scripts mirror the root ones — both spellings work.

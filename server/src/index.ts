@@ -603,6 +603,63 @@ app.get("/api/kg/export", (c) => {
   });
 });
 
+// Round-trip companion to the JSON export. Accepts the export shape (minus
+// embeddings — those get regenerated below) and a `replaceAll` flag; default
+// strategy skips nodes whose (name, type) pair already exists. The actual
+// insert happens inside a single transaction in `importKg`, so a malformed
+// row anywhere in the body rolls the whole thing back.
+//
+// We intentionally do NOT validate every field tightly — the import shape is
+// internal (we produced the file ourselves at /export), and overly strict
+// validation would reject hand-edited backups for trivial reasons. Minimal
+// shape check + transactional insert is the right tradeoff: a bad row blows
+// up the SQL, the tx rolls back, the caller sees the error string.
+app.post("/api/kg/import", async (c) => {
+  const body = await c.req
+    .json<{
+      nodes?: unknown;
+      edges?: unknown;
+      replaceAll?: unknown;
+    }>()
+    .catch(() => null);
+  if (!body) return c.json({ error: "invalid JSON" }, 400);
+  if (!Array.isArray(body.nodes) || !Array.isArray(body.edges)) {
+    return c.json({ error: "nodes and edges must be arrays" }, 400);
+  }
+  const replaceAll = body.replaceAll === true;
+
+  let result: kg.KgImportResult;
+  try {
+    result = kg.importKg(
+      { nodes: body.nodes as kg.Node[], edges: body.edges as kg.Edge[] },
+      { replaceAll },
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Unknown error";
+    console.error("[import] failed:", err);
+    return c.json({ error: `import failed: ${msg}` }, 400);
+  }
+
+  // Re-embed in the background so the response isn't gated on Voyage. Failure
+  // is non-fatal — same posture as record-fact: FTS still works, hybrid
+  // retrieval just skips the cosine pass for unembedded nodes until a future
+  // re-embed run catches them.
+  if (result.insertedNodes.length > 0) {
+    embedNodes(result.insertedNodes).catch((err) =>
+      console.warn("[import] embedding failed:", err),
+    );
+  }
+
+  return c.json({
+    ok: true,
+    nodesInserted: result.nodesInserted,
+    nodesSkipped: result.nodesSkipped,
+    edgesInserted: result.edgesInserted,
+    edgesSkipped: result.edgesSkipped,
+    replaceAll,
+  });
+});
+
 // ───────── Static SPA serving ─────────
 //
 // In single-origin prod, Hono serves the built web bundle at `/` (and its
