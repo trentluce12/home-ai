@@ -20,6 +20,7 @@ import { sqliteSessionStore } from "./sessions/store.js";
 import { cleanupSessions } from "./sessions/cleanup.js";
 import { db } from "./kg/db.js";
 import { authRoutes } from "./routes/auth.js";
+import { requireAuth } from "./auth/middleware.js";
 
 // Load .env from the project root (one level above server/)
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -42,6 +43,13 @@ if (process.env.NODE_ENV !== "production") {
     }),
   );
 }
+
+// Gate all `/api/*` routes behind a session check. The middleware itself
+// allows `/api/auth/*` through unauthenticated — login can't require a
+// prior login — so the order vs. `app.route("/api/auth", ...)` below is
+// not load-bearing, but registering the middleware first matches Hono's
+// top-to-bottom convention for path-level handlers.
+app.use("/api/*", requireAuth);
 
 app.route("/api/auth", authRoutes);
 
