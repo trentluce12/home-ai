@@ -12,6 +12,20 @@ A personal AI: streaming chat UI on top of the Anthropic API. Knowledge graph co
 
 Newest first. Append entries; don't edit history.
 
+### 2026-05-03 · Obsidian markdown import — runtime agent flow, not structured importer
+
+`m4p3-obsidian-import` ships as a **system-prompt extension** for the home-ai chat agent rather than a structured parser. Markdown is too varied across users (vault conventions, tag dialects, frontmatter discipline) to reliably extract facts via regex; the model has to do the judgement work. So the implementation is a runtime flow — when a user asks for an Obsidian import or types `/import-obsidian <path>` in chat, the home-ai agent walks the vault using its existing `Read` + `Glob` tools and records facts via `mcp__kg__record_user_fact`.
+
+**Why a system-prompt rule, not a slash command in the API.** "Typing `/anything` just sends to chat" was locked in during M4 phase 1 (no command parsing in the input layer). So `/import-obsidian` in the chat input is just a literal string — the system prompt teaches the agent to recognize the prefix and switch into bulk-extract mode. Same approach as the M2 `<context>` block: model-driven instead of code-driven.
+
+**Idempotency: tool-driven, not schema-driven.** `link()` already dedupes nodes via `findOrCreateNode` (lookup by `(name, type)`), but `addEdge()` always inserts a new row. Adding edge-level dedup at the schema layer was tempting but out of scope — it would change every fact-recording path (chat agent, seed, JSON import, web record-fact endpoint). Instead the system prompt instructs the agent to call `mcp__kg__neighbors` on the source node before each `record_user_fact` and skip if an edge of the same type to a node with the same name exists. This keeps edge-dedup as a per-flow concern (the import flow needs it; the chat-fact flow doesn't, since users restating "my dog is Snickers" twice is rare and harmless).
+
+**`record_inferred_fact` is generally off-limits in this flow.** When the user explicitly invokes the import, anything the agent records is implicitly under user authority — `record_user_fact` is the right confidence semantic. The exception is when the note prose itself flags uncertainty ("I think...", "probably..."), in which case the inferred-fact tool is correct.
+
+**Companion `.claude/commands/import-obsidian.md`** is shipped as a thin reference card for the dev harness — it points the maintainer at the home-ai chat flow rather than doing the import itself, since Claude Code can't reach the home-ai KG MCP server. It does an existence check on the path via `Glob` so a typo is caught before the user wastes a chat turn on it.
+
+**Out of scope.** Build-time (seed-time) Obsidian import — facts that survive a `predev` reset — would extend `/seed-fact` rather than this flow; that's a separate task if it ever proves useful.
+
 ### 2026-05-03 · JSON KG import — merge strategy + ID rewriting
 
 `m4p3-json-import` round-trips the existing `/api/kg/export` JSON. Three calls worth pinning:

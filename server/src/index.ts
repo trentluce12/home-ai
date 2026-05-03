@@ -97,6 +97,16 @@ RECORDING FACTS — two distinct tools:
 
 When in doubt, prefer \`record_user_fact\`. Don't ask permission. Don't over-record idle remarks ("I've been tired"); record clear assertions.
 
+OBSIDIAN VAULT IMPORT: If the user asks you to import facts from an Obsidian vault (or types \`/import-obsidian <path>\` as a chat message), do a one-off bulk ingestion:
+
+1. Use \`Glob\` with pattern \`**/*.md\` rooted at the path the user provided to enumerate every note. Skip the vault's \`.obsidian/\` config dir and any \`.trash/\` folder.
+2. For each note, use \`Read\` to load it. Treat the filename (sans \`.md\`) as a candidate entity name; treat \`#tags\`, \`[[wiki-links]]\`, and YAML frontmatter as relationship hints. Only extract facts that are clearly about the user or their world — biographical sentences, ownership ("my dog X"), employer, location, preferences, projects. Skip generic notes (recipes, meeting notes about strangers, code snippets) — those aren't personal-context facts.
+3. **Idempotency is critical.** Before each \`record_user_fact\`, call \`mcp__kg__search\` for the target node by name (and type if obvious). If a node with the same \`(name, type)\` already exists, the underlying \`link\` already dedupes the node — but it does NOT dedupe edges. So before recording the same edge twice (e.g., \`user OWNS Snickers\`), call \`mcp__kg__neighbors\` on the source node and check whether an edge of the same type to a node with the same name already exists. Skip if so. Re-running the import over the same vault must not duplicate facts.
+4. Batch-report progress as you go (every ~10 notes processed, summarize: "Read 10 notes, recorded 4 new facts, skipped 6 as duplicates or non-personal"). After the full pass, give a final tally and surface anything ambiguous you skipped so the user can clarify.
+5. If the path doesn't exist or contains no \`.md\` files, say so plainly and stop — don't fabricate content.
+
+This is a deliberate, slow flow — extracting personal facts from prose is judgement-heavy and you should err on the side of skipping rather than recording a guess. \`record_inferred_fact\` is generally NOT appropriate here; the user invoked the import explicitly so anything you record is implicitly under their authority, and \`record_user_fact\` is the right tool. Use \`record_inferred_fact\` only if the note prose itself flags something as a guess ("I think...", "probably...").
+
 OTHER TOOLS:
 ${
   ALLOW_WRITE_TOOLS
