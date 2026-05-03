@@ -23,6 +23,11 @@ export default [
       "**/node_modules/**",
       "**/*.tsbuildinfo",
       "data/**",
+      // Harness-managed git worktrees (gitignored) — orphans from prior
+      // /task-batch runs would otherwise fail lint with no-undef on `process`
+      // because the `.claude/scripts/` files matcher only matches the canonical
+      // path, not nested copies under worktree dirs.
+      ".claude/worktrees/**",
     ],
   },
 

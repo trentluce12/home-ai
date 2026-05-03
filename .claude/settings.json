@@ -22,6 +22,10 @@
       "Bash(git checkout:*)",
       "Bash(git commit:*)",
       "Bash(git merge:*)",
+      "Bash(git worktree list:*)",
+      "Bash(git worktree prune)",
+      "Bash(git worktree remove --force .claude/worktrees/agent-:*)",
+      "Bash(git branch -D worktree-agent-:*)",
       "Bash(ls:*)",
       "Bash(pwd)",
       "Bash(which:*)"
@@ -32,7 +36,31 @@
       "Bash(git push -f:*)",
       "Bash(git reset --hard:*)",
       "Bash(git clean -f:*)",
-      "Bash(git branch -D:*)"
+      "Bash(git branch -D main)",
+      "Bash(git branch -D dev-tl)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/scripts/block-main-commit.mjs"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .claude/scripts/check-stale-tasks.mjs"
+          }
+        ]
+      }
     ]
   },
   "hooks": {

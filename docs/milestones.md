@@ -78,9 +78,18 @@ Split into three phases; each ships independently.
 
 Stories tracked in `tasks/planned/` (`m4p3-*`).
 
-## M4.5 — production deployment + auth (designed, not started)
+## M4.5 — production deployment + auth (shipped ✓)
 
-Self-hosted Docker deployment reachable from anywhere. Lands before M5 so notes don't accumulate on an unauthed URL. See `docs/design.md` for the full design entry. Stories tracked in `tasks/planned/` (`m45-*`).
+- [x] `auth_sessions` table + token store (`server/src/auth/store.ts`); idle expiry tracked in DB so restarts don't drop logins.
+- [x] `/api/*` route prefix — clean split between SPA paths and API. Dev CORS scoped to `:5173`; prod is same-origin so CORS is off.
+- [x] Password auth: `POST /api/auth/login` checks bcrypt against `HOME_AI_PASSWORD_HASH`, mints a session, sets HttpOnly cookie. `POST /api/auth/logout` revokes. `GET /api/auth/me` reports state. Per-IP rate limit (5 / 15 min).
+- [x] Auth middleware on `/api/*` (passes `/api/auth/*` through unauthed); 401 on missing/expired cookie.
+- [x] Login page at `/login` (web/src/pages/Login.tsx) — gated route, redirects to `/` on success.
+- [x] Static serving in production: `serveStatic` mounts `web/dist`, SPA fallback to `index.html` for non-`/api/*` paths so client routes hydrate.
+- [x] Tool narrowing (`HOME_AI_ALLOW_WRITE_TOOLS`): default prod allowlist excludes `Bash`/`Write`/`Edit`, leaving KG tools + `Read`/`Glob`/`Grep`/`WebFetch`/`WebSearch`. Opt back in for local dev.
+- [x] Multi-stage Dockerfile (node:22-alpine), runs as `node` user, read-only root FS, `/data` the only writable mount, `wget`-based healthcheck on `GET /`.
+- [x] `docker-compose.yml` mirrors prod posture: read-only root, tmpfs `/tmp`, cap_drop ALL, no-new-privileges, named `home-ai-data` volume.
+- [x] README "Deploy" section: env var reference, bcrypt recipe, `docker compose up`, `/data` backup recipe.
 
 Smoke test: `docker compose up` on a clean machine, set env, hit URL, log in, send a chat, kill container, recreate, KG and sessions persist.
 

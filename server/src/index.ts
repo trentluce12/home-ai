@@ -1,7 +1,8 @@
 import { config } from "dotenv";
 import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
+import { dirname, relative, resolve } from "node:path";
 import { serve } from "@hono/node-server";
+import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { streamSSE } from "hono/streaming";
@@ -19,6 +20,8 @@ import { embedNodes } from "./embeddings/index.js";
 import { sqliteSessionStore } from "./sessions/store.js";
 import { cleanupSessions } from "./sessions/cleanup.js";
 import { db } from "./kg/db.js";
+import { authRoutes } from "./routes/auth.js";
+import { requireAuth } from "./auth/middleware.js";
 
 // Load .env from the project root (one level above server/)
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -26,7 +29,47 @@ const PROJECT_DIR = resolve(__dirname, "../..");
 config({ path: resolve(PROJECT_DIR, ".env") });
 
 const app = new Hono();
-app.use("*", cors({ origin: "http://localhost:5173" }));
+// In production the SPA is served from the same origin as the API (see
+// `m45-static-serving`), so CORS is unnecessary. In dev, Vite runs on
+// :5173 and the server on :3001, so we still need it.
+if (process.env.NODE_ENV !== "production") {
+  app.use(
+    "*",
+    cors({
+      origin: "http://localhost:5173",
+      // Browser must be allowed to send/receive the session cookie cross-origin
+      // in dev (vite :5173 → server :3001). In prod the SPA is served from the
+      // same origin, so no CORS at all.
+      credentials: true,
+    }),
+  );
+}
+
+// Gate all `/api/*` routes behind a session check. The middleware itself
+// allows `/api/auth/*` through unauthenticated — login can't require a
+// prior login — so the order vs. `app.route("/api/auth", ...)` below is
+// not load-bearing, but registering the middleware first matches Hono's
+// top-to-bottom convention for path-level handlers.
+app.use("/api/*", requireAuth);
+
+app.route("/api/auth", authRoutes);
+
+// Tool narrowing for production safety. By default we exclude Bash/Write/Edit
+// — chat usage doesn't exercise them day-to-day, and dropping them shrinks the
+// blast radius of an auth bypass from "execute arbitrary shell" to "read files
+// + browse the web". Set `HOME_AI_ALLOW_WRITE_TOOLS=true` to opt back in for
+// local-dev workflows where the model genuinely needs to edit files / run
+// commands.
+const ALLOW_WRITE_TOOLS = process.env.HOME_AI_ALLOW_WRITE_TOOLS === "true";
+const ALLOWED_TOOLS: string[] = [
+  ...KG_TOOL_NAMES,
+  "Read",
+  "Glob",
+  "Grep",
+  "WebFetch",
+  "WebSearch",
+  ...(ALLOW_WRITE_TOOLS ? ["Bash", "Write", "Edit"] : []),
+];
 
 const SYSTEM_PROMPT = `You are home-ai — a personal AI for the user. You are warm, direct, and concise. Match the user's tone and length: terse questions get terse answers, open questions can get longer ones. Never preface with filler like "I'd be happy to help" or "Of course!". When you don't know something, say so.
 
@@ -55,13 +98,23 @@ RECORDING FACTS — two distinct tools:
 When in doubt, prefer \`record_user_fact\`. Don't ask permission. Don't over-record idle remarks ("I've been tired"); record clear assertions.
 
 OTHER TOOLS:
-- File system (Read, Write, Edit, Glob, Grep) and Bash are available for tasks involving files or shell commands.
+${
+  ALLOW_WRITE_TOOLS
+    ? `- File system (Read, Write, Edit, Glob, Grep) and Bash are available for tasks involving files or shell commands.`
+    : `- File system (Read, Glob, Grep) for searching and reading files. You cannot write or edit files, and Bash/shell commands are not available.`
+}
 - Web tools (WebFetch, WebSearch) for current information.
 - For personal-context questions, prefer the KG (and the auto-injected context) before reaching for the web.
 
 YOUR ACTUAL CAPABILITIES — be honest about what you can and cannot do:
-- You CAN: chat with the user, read/write/search the personal KG (the tools above), read and edit files on this machine, run shell commands via Bash, fetch URLs (WebFetch), and run web searches (WebSearch).
-- You CANNOT: send email, read mail, access calendars, schedule events, send notifications, control smart-home devices, run background jobs, integrate with Gmail/Calendar/Drive/Slack/Notion/Supabase or any third-party service, or take any action that isn't covered by the tools above.
+- You CAN: chat with the user, read/write/search the personal KG (the tools above), ${
+  ALLOW_WRITE_TOOLS
+    ? "read and edit files on this machine, run shell commands via Bash, "
+    : "read files on this machine (read-only — no editing or shell access), "
+}fetch URLs (WebFetch), and run web searches (WebSearch).
+- You CANNOT: ${
+  ALLOW_WRITE_TOOLS ? "" : "edit/write files, run shell commands, "
+}send email, read mail, access calendars, schedule events, send notifications, control smart-home devices, run background jobs, integrate with Gmail/Calendar/Drive/Slack/Notion/Supabase or any third-party service, or take any action that isn't covered by the tools above.
 - Don't claim integrations or features that aren't in the list above. If the user asks for something you can't do, say so plainly and offer the closest thing you actually can do.`;
 
 interface ChatRequest {
@@ -74,7 +127,7 @@ function wrapWithContext(userText: string, contextBlock: string): string {
   return `<context>\n${contextBlock}\n</context>\n\n${userText}`;
 }
 
-app.post("/chat", async (c) => {
+app.post("/api/chat", async (c) => {
   const body = await c.req.json<ChatRequest>();
   const userText = body.message?.trim();
   if (!userText) {
@@ -105,17 +158,7 @@ app.post("/chat", async (c) => {
           systemPrompt: SYSTEM_PROMPT,
           permissionMode: "bypassPermissions",
           mcpServers: { kg: kgServer },
-          allowedTools: [
-            ...KG_TOOL_NAMES,
-            "Bash",
-            "Read",
-            "Write",
-            "Edit",
-            "Glob",
-            "Grep",
-            "WebFetch",
-            "WebSearch",
-          ],
+          allowedTools: ALLOWED_TOOLS,
           includePartialMessages: true,
           ...(body.sessionId ? { resume: body.sessionId } : {}),
         },
@@ -331,7 +374,7 @@ function extractText(message: unknown): string {
     .join("");
 }
 
-app.get("/sessions", async (c) => {
+app.get("/api/sessions", async (c) => {
   const includeArchived = c.req.query("includeArchived") === "true";
   const sessions = await listSessions({
     dir: PROJECT_DIR,
@@ -357,7 +400,7 @@ app.get("/sessions", async (c) => {
   );
 });
 
-app.get("/sessions/:id/history", async (c) => {
+app.get("/api/sessions/:id/history", async (c) => {
   const id = c.req.param("id");
   const messages = await getSessionMessages(id, {
     dir: PROJECT_DIR,
@@ -376,13 +419,13 @@ app.get("/sessions/:id/history", async (c) => {
   return c.json(turns);
 });
 
-app.delete("/sessions/:id", async (c) => {
+app.delete("/api/sessions/:id", async (c) => {
   const id = c.req.param("id");
   await deleteSession(id, { dir: PROJECT_DIR, sessionStore: sqliteSessionStore });
   return c.json({ ok: true });
 });
 
-app.patch("/sessions/:id", async (c) => {
+app.patch("/api/sessions/:id", async (c) => {
   const id = c.req.param("id");
   const body = await c.req
     .json<{ title?: string }>()
@@ -400,19 +443,19 @@ app.patch("/sessions/:id", async (c) => {
 
 // ───────── KG (slash commands) ─────────
 
-app.get("/kg/recent", (c) => {
+app.get("/api/kg/recent", (c) => {
   const limit = Number(c.req.query("limit") ?? 20);
   return c.json(kg.recentNodes(Number.isFinite(limit) ? limit : 20));
 });
 
-app.get("/kg/recent-edges", (c) => {
+app.get("/api/kg/recent-edges", (c) => {
   const limit = Number(c.req.query("limit") ?? 8);
   return c.json(kg.recentEdges(Number.isFinite(limit) ? limit : 8));
 });
 
-app.get("/kg/stats", (c) => c.json(kg.kgStats()));
+app.get("/api/kg/stats", (c) => c.json(kg.kgStats()));
 
-app.get("/kg/by-name/:name", (c) => {
+app.get("/api/kg/by-name/:name", (c) => {
   const name = c.req.param("name");
   const nodes = kg.findNodesByName(name);
   const withNeighbors = nodes.map((node) => ({
@@ -422,7 +465,7 @@ app.get("/kg/by-name/:name", (c) => {
   return c.json(withNeighbors);
 });
 
-app.get("/kg/node/:id", (c) => {
+app.get("/api/kg/node/:id", (c) => {
   const id = c.req.param("id");
   const node = kg.getNode(id);
   if (!node) return c.json({ error: "Node not found" }, 404);
@@ -437,14 +480,14 @@ app.get("/kg/node/:id", (c) => {
   return c.json({ node, neighbors, provenance });
 });
 
-app.delete("/kg/node/:id", (c) => {
+app.delete("/api/kg/node/:id", (c) => {
   const id = c.req.param("id");
   const result = kg.deleteNode(id);
   if (!result.deleted) return c.json({ error: "Node not found" }, 404);
   return c.json(result);
 });
 
-app.get("/kg/graph", (c) => {
+app.get("/api/kg/graph", (c) => {
   const nodes = db.prepare(`SELECT id, name, type FROM nodes`).all() as {
     id: string;
     name: string;
@@ -456,7 +499,7 @@ app.get("/kg/graph", (c) => {
   return c.json({ nodes, edges });
 });
 
-app.post("/kg/record-fact", async (c) => {
+app.post("/api/kg/record-fact", async (c) => {
   const body = await c.req
     .json<{
       a: { name: string; type: string };
@@ -528,11 +571,11 @@ app.post("/kg/record-fact", async (c) => {
   });
 });
 
-app.get("/kg/layout", (c) => {
+app.get("/api/kg/layout", (c) => {
   return c.json(kg.getLayout());
 });
 
-app.post("/kg/layout", async (c) => {
+app.post("/api/kg/layout", async (c) => {
   const body = await c.req
     .json<{ positions: { nodeId: string; x: number; y: number }[] }>()
     .catch(() => null);
@@ -546,7 +589,7 @@ app.post("/kg/layout", async (c) => {
   return c.json({ ok: true, saved: valid.length });
 });
 
-app.get("/kg/export", (c) => {
+app.get("/api/kg/export", (c) => {
   const format = c.req.query("format") ?? "json";
   if (format === "dot") {
     return c.body(kg.exportKgDot(), 200, {
@@ -560,7 +603,41 @@ app.get("/kg/export", (c) => {
   });
 });
 
-app.get("/", (c) => c.text("home-ai server"));
+// ───────── Static SPA serving ─────────
+//
+// In single-origin prod, Hono serves the built web bundle at `/` (and its
+// asset paths). This MUST be mounted after every `/api/*` route above so
+// Hono's top-to-bottom matcher hits the API handlers first — otherwise the
+// static catch-all would shadow them.
+//
+// `serveStatic`'s `root` is resolved relative to `process.cwd()` (absolute
+// paths are explicitly unsupported per the upstream README). cwd differs
+// between dev (`server/` — npm workspaces cd into the workspace dir) and
+// prod (the container root, where the Dockerfile's `node server/dist/index.js`
+// entrypoint runs). Computing the path via `path.relative` against the
+// already-resolved `PROJECT_DIR` makes both work without a side-effecting
+// `process.chdir`.
+//
+// Missing `web/dist` (i.e. `vite build` hasn't run yet in dev) is non-fatal —
+// `serveStatic` logs a warning at startup and 404s on each request, which
+// then falls through to the SPA fallback below; that 404s too. Acceptable in
+// dev where the SPA is served by Vite on :5173 anyway.
+const WEB_DIST_DIR = resolve(PROJECT_DIR, "web/dist");
+const WEB_DIST_RELATIVE = relative(process.cwd(), WEB_DIST_DIR) || ".";
+const WEB_DIST_INDEX_RELATIVE = relative(
+  process.cwd(),
+  resolve(WEB_DIST_DIR, "index.html"),
+);
+
+app.use("*", serveStatic({ root: WEB_DIST_RELATIVE }));
+// SPA fallback: any non-`/api/*` path that didn't match a real file gets
+// `index.html`, so client-side routes (e.g. `/login`) hydrate correctly.
+// Explicitly skip `/api/*` — an authed request to a non-existent API route
+// should 404, not silently swallow the path and return the SPA.
+app.get("*", async (c, next) => {
+  if (c.req.path.startsWith("/api/")) return next();
+  return serveStatic({ path: WEB_DIST_INDEX_RELATIVE })(c, next);
+});
 
 const port = Number(process.env.PORT) || 3001;
 serve({ fetch: app.fetch, port }, (info) => {
@@ -571,4 +648,7 @@ serve({ fetch: app.fetch, port }, (info) => {
     );
   }
   console.log(`home-ai server running on http://localhost:${info.port}`);
+  console.log(
+    `[tools] allowedTools: ${ALLOWED_TOOLS.join(", ")} (HOME_AI_ALLOW_WRITE_TOOLS=${ALLOW_WRITE_TOOLS})`,
+  );
 });

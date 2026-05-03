@@ -1,4 +1,7 @@
-export const SERVER_URL = "http://localhost:3001";
+// In dev, VITE_SERVER_URL points cross-port at the Hono server (`http://localhost:3001`).
+// In prod, the SPA is served from the same origin as the API (see `m45-static-serving`),
+// so an empty string makes all `${SERVER_URL}/api/...` calls relative.
+export const SERVER_URL = import.meta.env.VITE_SERVER_URL ?? "";
 
 export type Message = { role: "user" | "assistant"; content: string };
 
@@ -91,8 +94,15 @@ export interface NodeDetail {
   provenance: { source: string; sourceRef: string | null; createdAt: number }[];
 }
 
+// `credentials: "include"` is required so the browser sends/receives the
+// `home_ai_session` cookie cross-origin in dev (Vite :5173 → server :3001).
+// In prod the SPA is same-origin so it's a no-op there. Always set so callers
+// don't have to care about the deployment shape.
 async function jsonFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${SERVER_URL}${path}`, init);
+  const res = await fetch(`${SERVER_URL}${path}`, {
+    credentials: "include",
+    ...init,
+  });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(`${res.status} ${res.statusText}${text ? ` — ${text}` : ""}`);
@@ -100,24 +110,63 @@ async function jsonFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+export interface AuthMeResponse {
+  authenticated: boolean;
+}
+
+/**
+ * Login response shape. Server returns `{ ok: true }` on success; on failure
+ * we throw with the status, which the caller distinguishes (401 vs 429 vs 500)
+ * to pick the right user-facing copy.
+ */
+export class LoginError extends Error {
+  constructor(
+    public status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "LoginError";
+  }
+}
+
 export const api = {
-  listSessions: () => jsonFetch<SessionSummary[]>("/sessions"),
-  sessionHistory: (id: string) => jsonFetch<Message[]>(`/sessions/${id}/history`),
+  me: () => jsonFetch<AuthMeResponse>("/api/auth/me"),
+  login: async (password: string): Promise<void> => {
+    const res = await fetch(`${SERVER_URL}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ password }),
+    });
+    if (!res.ok) {
+      // Don't surface response text — both unconfigured-server (500) and
+      // wrong-password (401) should look like a failed login from the
+      // user's POV. Caller picks copy off the status alone.
+      throw new LoginError(res.status, `Login failed (${res.status})`);
+    }
+  },
+  logout: () =>
+    jsonFetch<{ ok: true }>("/api/auth/logout", {
+      method: "POST",
+    }),
+  listSessions: () => jsonFetch<SessionSummary[]>("/api/sessions"),
+  sessionHistory: (id: string) => jsonFetch<Message[]>(`/api/sessions/${id}/history`),
   deleteSession: (id: string) =>
-    jsonFetch<{ ok: true }>(`/sessions/${id}`, { method: "DELETE" }),
+    jsonFetch<{ ok: true }>(`/api/sessions/${id}`, { method: "DELETE" }),
   renameSession: (id: string, title: string) =>
-    jsonFetch<{ ok: true; title: string }>(`/sessions/${id}`, {
+    jsonFetch<{ ok: true; title: string }>(`/api/sessions/${id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title }),
     }),
-  recentNodes: (limit = 20) => jsonFetch<KgNode[]>(`/kg/recent?limit=${limit}`),
-  recentEdges: (limit = 8) => jsonFetch<RecentEdge[]>(`/kg/recent-edges?limit=${limit}`),
-  stats: () => jsonFetch<KgStats>("/kg/stats"),
+  recentNodes: (limit = 20) => jsonFetch<KgNode[]>(`/api/kg/recent?limit=${limit}`),
+  recentEdges: (limit = 8) =>
+    jsonFetch<RecentEdge[]>(`/api/kg/recent-edges?limit=${limit}`),
+  stats: () => jsonFetch<KgStats>("/api/kg/stats"),
   byName: (name: string) =>
-    jsonFetch<NodeWithNeighbors[]>(`/kg/by-name/${encodeURIComponent(name)}`),
+    jsonFetch<NodeWithNeighbors[]>(`/api/kg/by-name/${encodeURIComponent(name)}`),
   deleteNode: (id: string) =>
-    jsonFetch<{ deleted: boolean; edgesRemoved: number }>(`/kg/node/${id}`, {
+    jsonFetch<{ deleted: boolean; edgesRemoved: number }>(`/api/kg/node/${id}`, {
       method: "DELETE",
     }),
   recordFact: (input: {
@@ -125,17 +174,17 @@ export const api = {
     b: { name: string; type: string };
     edgeType: string;
   }) =>
-    jsonFetch<{ ok: true; edge: KgEdge }>(`/kg/record-fact`, {
+    jsonFetch<{ ok: true; edge: KgEdge }>(`/api/kg/record-fact`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),
     }),
-  exportUrl: (format: "json" | "dot") => `${SERVER_URL}/kg/export?format=${format}`,
-  graph: () => jsonFetch<GraphData>("/kg/graph"),
-  nodeDetail: (id: string) => jsonFetch<NodeDetail>(`/kg/node/${id}`),
-  getLayout: () => jsonFetch<NodeLayoutEntry[]>("/kg/layout"),
+  exportUrl: (format: "json" | "dot") => `${SERVER_URL}/api/kg/export?format=${format}`,
+  graph: () => jsonFetch<GraphData>("/api/kg/graph"),
+  nodeDetail: (id: string) => jsonFetch<NodeDetail>(`/api/kg/node/${id}`),
+  getLayout: () => jsonFetch<NodeLayoutEntry[]>("/api/kg/layout"),
   saveLayout: (positions: NodeLayoutEntry[]) =>
-    jsonFetch<{ ok: true; saved: number }>(`/kg/layout`, {
+    jsonFetch<{ ok: true; saved: number }>(`/api/kg/layout`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ positions }),

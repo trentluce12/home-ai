@@ -1,0 +1,5 @@
+# Enforce LF in working tree on all platforms so Prettier (endOfLine: lf)
+# stays green on Windows where core.autocrlf=true would otherwise convert
+# LF -> CRLF on checkout. Binary files are excluded automatically by
+# `text=auto`.
+* text=auto eol=lf

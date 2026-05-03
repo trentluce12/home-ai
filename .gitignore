@@ -11,3 +11,4 @@ build/
 *.tsbuildinfo
 data/
 .claude/settings.local.json
+.claude/worktrees/
