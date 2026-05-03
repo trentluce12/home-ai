@@ -14,12 +14,20 @@ Steps:
    # <title>
 
    **Why:** TODO — one-line reason this task exists
-
-   **What:** TODO — brief description of the work; reference relevant design log entry if applicable
-
+   **What:** TODO — brief description of the work
    **Files:** TBD
-
    **Estimate:** TBD
+   **Dependencies:** none
+   **Smoke steps:** TBD
+
+   ---
+
+   **Status:** pending
+   **Started:** —
+
+   ## Notes
    ```
+
+   The `---` separates user-authored fields (above) from agent-managed state (below).
 
 3. Report the created path.
