@@ -100,6 +100,23 @@ export interface NodeNote {
   updatedAt: string;
 }
 
+/**
+ * Mirrors the server's `ApprovalDecision` union (server/src/approval.ts).
+ * Kept as a duplicated definition rather than a shared types package — the
+ * project doesn't have a cross-workspace types layer and this surface is small.
+ */
+export type ApprovalDecision =
+  | { decision: "approve" }
+  | { decision: "deny" }
+  | { decision: "tweak"; tweakText: string };
+
+/** SSE-side payload for `approval_request` events. */
+export interface ApprovalRequest {
+  requestId: string;
+  kind: string;
+  payload: unknown;
+}
+
 // `credentials: "include"` is required so the browser sends/receives the
 // `home_ai_session` cookie cross-origin in dev (Vite :5173 → server :3001).
 // In prod the SPA is same-origin so it's a no-op there. Always set so callers
@@ -219,6 +236,12 @@ export const api = {
   deleteNote: (id: string) =>
     jsonFetch<{ deleted: boolean }>(`/api/kg/node/${id}/note`, {
       method: "DELETE",
+    }),
+  respondApproval: (requestId: string, decision: ApprovalDecision) =>
+    jsonFetch<{ ok: true }>(`/api/approval/${encodeURIComponent(requestId)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(decision),
     }),
 };
 

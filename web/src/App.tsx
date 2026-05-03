@@ -6,7 +6,14 @@ import { SessionList } from "./components/SessionList";
 import { EmptyDashboard } from "./components/EmptyDashboard";
 import { GraphView } from "./components/GraphView";
 import { Login } from "./components/Login";
-import { api, SERVER_URL, type Message, type MemoryEvent } from "./lib/api";
+import { ApprovalModal } from "./components/ApprovalModal";
+import {
+  api,
+  SERVER_URL,
+  type ApprovalRequest,
+  type Message,
+  type MemoryEvent,
+} from "./lib/api";
 
 const NEAR_BOTTOM_PX = 80;
 
@@ -54,6 +61,7 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [graphOpen, setGraphOpen] = useState(false);
   const [showJumpPill, setShowJumpPill] = useState(false);
+  const [approvalRequest, setApprovalRequest] = useState<ApprovalRequest | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -105,6 +113,7 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
     setSessionId(null);
     setError(null);
     setInput("");
+    setApprovalRequest(null);
     stickToBottomRef.current = true;
     setShowJumpPill(false);
   }
@@ -230,6 +239,18 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
           },
         ]);
         break;
+      case "approval_request": {
+        const requestId = payload.requestId;
+        const kind = payload.kind;
+        if (typeof requestId === "string" && typeof kind === "string") {
+          setApprovalRequest({
+            requestId,
+            kind,
+            payload: payload.payload,
+          });
+        }
+        break;
+      }
       case "done": {
         const usage =
           (payload.usage as
@@ -404,6 +425,13 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
         onClose={() => setGraphOpen(false)}
         refreshKey={refreshKey}
       />
+
+      {approvalRequest && (
+        <ApprovalModal
+          request={approvalRequest}
+          onResolved={() => setApprovalRequest(null)}
+        />
+      )}
     </div>
   );
 }

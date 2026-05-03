@@ -22,6 +22,12 @@ import { cleanupSessions } from "./sessions/cleanup.js";
 import { db } from "./kg/db.js";
 import { authRoutes } from "./routes/auth.js";
 import { requireAuth } from "./auth/middleware.js";
+import {
+  cancelApprovalsForStream,
+  resolveApproval,
+  withApprovalContext,
+  type ApprovalDecision,
+} from "./approval.js";
 
 // Load .env from the project root (one level above server/)
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -148,6 +154,17 @@ app.post("/api/chat", async (c) => {
   const prompt = wrapWithContext(userText, subgraph.formatted);
 
   return streamSSE(c, async (stream) => {
+    // If the tab closes mid-turn (or the user hits Stop), reject every pending
+    // approval owned by this stream so the agent loop unwinds rather than
+    // dangling on a Promise that will never settle. The 5-min timeout in
+    // `approval.ts` is the safety net; this is the prompt path.
+    stream.onAbort(() => {
+      const cancelled = cancelApprovalsForStream(stream);
+      if (cancelled > 0) {
+        console.log(`[approval] stream aborted, cancelled ${cancelled} pending`);
+      }
+    });
+
     if (subgraph.summary.edgeCount > 0 || subgraph.summary.nodeCount > 0) {
       await stream.writeSSE({
         data: JSON.stringify({
@@ -159,115 +176,155 @@ app.post("/api/chat", async (c) => {
     }
 
     try {
-      for await (const message of query({
-        prompt,
-        options: {
-          model: "claude-opus-4-7",
-          cwd: PROJECT_DIR,
-          sessionStore: sqliteSessionStore,
-          systemPrompt: SYSTEM_PROMPT,
-          permissionMode: "bypassPermissions",
-          mcpServers: { kg: kgServer },
-          allowedTools: ALLOWED_TOOLS,
-          includePartialMessages: true,
-          ...(body.sessionId ? { resume: body.sessionId } : {}),
-        },
-      })) {
-        const m = message as Record<string, unknown> & { type: string };
+      await withApprovalContext(stream, async () => {
+        for await (const message of query({
+          prompt,
+          options: {
+            model: "claude-opus-4-7",
+            cwd: PROJECT_DIR,
+            sessionStore: sqliteSessionStore,
+            systemPrompt: SYSTEM_PROMPT,
+            permissionMode: "bypassPermissions",
+            mcpServers: { kg: kgServer },
+            allowedTools: ALLOWED_TOOLS,
+            includePartialMessages: true,
+            ...(body.sessionId ? { resume: body.sessionId } : {}),
+          },
+        })) {
+          const m = message as Record<string, unknown> & { type: string };
 
-        switch (m.type) {
-          case "system": {
-            if (m.subtype === "init" && typeof m.session_id === "string") {
-              await stream.writeSSE({
-                data: JSON.stringify({ type: "session", id: m.session_id }),
-              });
-            }
-            break;
-          }
-          case "stream_event": {
-            // Token-by-token text. Tool_use input deltas are skipped here —
-            // the final assistant message carries complete tool_use blocks.
-            const ev = m.event as
-              | {
-                  type: string;
-                  delta?: { type: string; text?: string };
-                }
-              | undefined;
-            if (
-              ev?.type === "content_block_delta" &&
-              ev.delta?.type === "text_delta" &&
-              typeof ev.delta.text === "string"
-            ) {
-              await stream.writeSSE({
-                data: JSON.stringify({ type: "text", delta: ev.delta.text }),
-              });
-            }
-            break;
-          }
-          case "assistant": {
-            // Text already streamed via stream_event above. Forward tool_use
-            // blocks for the sidebar.
-            const inner = m.message as { content?: unknown[] } | undefined;
-            const content = inner?.content ?? [];
-            for (const blockRaw of content) {
-              const block = blockRaw as Record<string, unknown> & { type: string };
-              if (block.type === "tool_use") {
+          switch (m.type) {
+            case "system": {
+              if (m.subtype === "init" && typeof m.session_id === "string") {
                 await stream.writeSSE({
-                  data: JSON.stringify({
-                    type: "tool_use",
-                    id: block.id,
-                    name: block.name,
-                    input: block.input,
-                  }),
+                  data: JSON.stringify({ type: "session", id: m.session_id }),
                 });
               }
+              break;
             }
-            break;
-          }
-          case "result": {
-            const usage = m.usage as
-              | {
-                  input_tokens?: number;
-                  output_tokens?: number;
-                  cache_creation_input_tokens?: number;
-                  cache_read_input_tokens?: number;
+            case "stream_event": {
+              // Token-by-token text. Tool_use input deltas are skipped here —
+              // the final assistant message carries complete tool_use blocks.
+              const ev = m.event as
+                | {
+                    type: string;
+                    delta?: { type: string; text?: string };
+                  }
+                | undefined;
+              if (
+                ev?.type === "content_block_delta" &&
+                ev.delta?.type === "text_delta" &&
+                typeof ev.delta.text === "string"
+              ) {
+                await stream.writeSSE({
+                  data: JSON.stringify({ type: "text", delta: ev.delta.text }),
+                });
+              }
+              break;
+            }
+            case "assistant": {
+              // Text already streamed via stream_event above. Forward tool_use
+              // blocks for the sidebar.
+              const inner = m.message as { content?: unknown[] } | undefined;
+              const content = inner?.content ?? [];
+              for (const blockRaw of content) {
+                const block = blockRaw as Record<string, unknown> & { type: string };
+                if (block.type === "tool_use") {
+                  await stream.writeSSE({
+                    data: JSON.stringify({
+                      type: "tool_use",
+                      id: block.id,
+                      name: block.name,
+                      input: block.input,
+                    }),
+                  });
                 }
-              | undefined;
-            if (usage) {
-              const created = usage.cache_creation_input_tokens ?? 0;
-              const read = usage.cache_read_input_tokens ?? 0;
-              const input = usage.input_tokens ?? 0;
-              const output = usage.output_tokens ?? 0;
-              console.log(
-                `[chat] tokens: in=${input} out=${output} cache_create=${created} cache_read=${read}`,
-              );
+              }
+              break;
             }
-            await stream.writeSSE({
-              data: JSON.stringify({
-                type: "done",
-                success: m.subtype === "success",
-                totalCostUsd: m.total_cost_usd,
-                usage,
-              }),
-            });
+            case "result": {
+              const usage = m.usage as
+                | {
+                    input_tokens?: number;
+                    output_tokens?: number;
+                    cache_creation_input_tokens?: number;
+                    cache_read_input_tokens?: number;
+                  }
+                | undefined;
+              if (usage) {
+                const created = usage.cache_creation_input_tokens ?? 0;
+                const read = usage.cache_read_input_tokens ?? 0;
+                const input = usage.input_tokens ?? 0;
+                const output = usage.output_tokens ?? 0;
+                console.log(
+                  `[chat] tokens: in=${input} out=${output} cache_create=${created} cache_read=${read}`,
+                );
+              }
+              await stream.writeSSE({
+                data: JSON.stringify({
+                  type: "done",
+                  success: m.subtype === "success",
+                  totalCostUsd: m.total_cost_usd,
+                  usage,
+                }),
+              });
 
-            // Smart title side-call (background, doesn't block stream).
-            const sid = typeof m.session_id === "string" ? m.session_id : null;
-            if (sid && m.subtype === "success") {
-              maybeSmartTitle(sid).catch((err) =>
-                console.warn("[smart-title]", err instanceof Error ? err.message : err),
-              );
+              // Smart title side-call (background, doesn't block stream).
+              const sid = typeof m.session_id === "string" ? m.session_id : null;
+              if (sid && m.subtype === "success") {
+                maybeSmartTitle(sid).catch((err) =>
+                  console.warn("[smart-title]", err instanceof Error ? err.message : err),
+                );
+              }
+              break;
             }
-            break;
           }
         }
-      }
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
       console.error("Chat error:", err);
       await stream.writeSSE({ data: JSON.stringify({ type: "error", message: msg }) });
     }
   });
+});
+
+// ───────── Approval responses ─────────
+//
+// Counterpart to the `approval_request` SSE event. The web client POSTs here
+// when the user clicks Approve / Deny / Tweak in the modal; we look up the
+// resolver by `requestId` and unblock the awaiting tool. 404 if the request
+// doesn't exist (already resolved, timed out, or fabricated id).
+
+interface ApprovalRequestBody {
+  decision?: unknown;
+  tweakText?: unknown;
+}
+
+app.post("/api/approval/:requestId", async (c) => {
+  const requestId = c.req.param("requestId");
+  const body = await c.req.json<ApprovalRequestBody>().catch(() => null);
+  if (!body) return c.json({ error: "invalid JSON" }, 400);
+
+  let response: ApprovalDecision;
+  if (body.decision === "approve") {
+    response = { decision: "approve" };
+  } else if (body.decision === "deny") {
+    response = { decision: "deny" };
+  } else if (body.decision === "tweak") {
+    if (typeof body.tweakText !== "string" || body.tweakText.trim().length === 0) {
+      return c.json({ error: "tweakText required for tweak decision" }, 400);
+    }
+    response = { decision: "tweak", tweakText: body.tweakText };
+  } else {
+    return c.json({ error: "decision must be approve | deny | tweak" }, 400);
+  }
+
+  const matched = resolveApproval(requestId, response);
+  if (!matched) {
+    return c.json({ error: "no pending approval for this id" }, 404);
+  }
+  return c.json({ ok: true });
 });
 
 // ───────── Smart titling ─────────

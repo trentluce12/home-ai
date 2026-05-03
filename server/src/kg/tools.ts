@@ -2,6 +2,7 @@ import { tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import * as kg from "./db.js";
 import { embedNode, embedNodes } from "../embeddings/index.js";
+import { requestApproval } from "../approval.js";
 
 async function recordFact(input: {
   a: { nameOrId: string; type?: string };
@@ -229,6 +230,26 @@ const statsTool = tool(
   },
 );
 
+// Smoke tool for the approval-modal infrastructure (m5p2). Exercises all three
+// decision paths end-to-end without needing a downstream consumer wired up.
+// Real approval-gated tools (propose_note_edit, propose_node_merge) ship in
+// later M5 stories; this tool can be retired once those land.
+const approvalTestTool = tool(
+  "approval_test",
+  "Test scaffold for the approval modal. Sends an approval_request SSE event with the given payload and returns the user's decision verbatim. Use this to exercise the Approve/Deny/Tweak paths during development. Not for production use.",
+  {
+    payload: z
+      .record(z.string(), z.unknown())
+      .optional()
+      .describe("Arbitrary JSON shown in the modal. Defaults to a sample object."),
+  },
+  async (args) => {
+    const payload = args.payload ?? { sample: "hello", note: "approval test" };
+    const response = await requestApproval("test", payload);
+    return { content: [{ type: "text", text: JSON.stringify(response, null, 2) }] };
+  },
+);
+
 export const kgServer = createSdkMcpServer({
   name: "kg",
   version: "0.2.0",
@@ -241,6 +262,7 @@ export const kgServer = createSdkMcpServer({
     updateNodeTool,
     recentTool,
     statsTool,
+    approvalTestTool,
   ],
 });
 
@@ -253,4 +275,5 @@ export const KG_TOOL_NAMES = [
   "mcp__kg__update_node",
   "mcp__kg__recent",
   "mcp__kg__stats",
+  "mcp__kg__approval_test",
 ];
