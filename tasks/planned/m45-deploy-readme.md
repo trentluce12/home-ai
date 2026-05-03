@@ -10,4 +10,6 @@
 
 **Files:** `README.md`
 
+**Dependencies:** m45-api-prefix, m45-auth-sessions-table, m45-auth-routes, m45-auth-middleware, m45-login-page, m45-static-serving, m45-restrict-tools, m45-docker
+
 **Estimate:** TBD
