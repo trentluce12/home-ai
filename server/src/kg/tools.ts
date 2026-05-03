@@ -359,6 +359,152 @@ const proposeNoteEditTool = tool(
   },
 );
 
+// Second consumer of the approval modal (m5p3). Collapses N duplicate nodes
+// into one, with all the messy bookkeeping — edge rewrites, provenance
+// migration, note unification, embedding regen — happening atomically inside
+// `mergeNodes`. The proposal payload carries enough for the modal to render
+// the source nodes + their edges + the proposed unified target so the user
+// can sanity-check before approving.
+const proposeNodeMergeTool = tool(
+  "propose_node_merge",
+  "Propose collapsing N duplicate KG nodes into a single unified node. The user sees the source nodes (with their edges) and the proposed target (name/type/note body) and approves, denies, or tweaks. Use ONLY for genuine semantic duplicates that surface across retrievals — e.g. `Topic:react` and `Topic:React`, `Person:John` and `Person:John_Doe`, `Pet:snickers` and `Pet:Snickers`. On approve: edges combine (deduped by (other_end, edge_type), self-loops dropped), provenance rewrites to the target with a `merged_from_<sourceId>` annotation, note bodies are replaced verbatim by `target.body`, source nodes are deleted (cascading their embeddings + layout + notes). The target is re-embedded in the background. Don't propose a merge for nodes that share a type but represent different entities (two real people both named John).",
+  {
+    sourceIds: z
+      .array(z.string())
+      .min(1)
+      .describe(
+        "Node IDs of the duplicates to absorb (each starts with 'node_'). All sources are deleted on approve; their content is consolidated into the target.",
+      ),
+    target: z
+      .object({
+        name: z.string().describe("Canonical name for the unified node."),
+        type: z
+          .string()
+          .describe(
+            "Node type for the unified node (e.g. 'Topic', 'Person'). Must match one of the standard NODE_TYPES.",
+          ),
+        body: z
+          .string()
+          .describe(
+            "Full markdown note body for the unified node. Replaces any existing note on the target verbatim — write the complete consolidated body, not a diff. Pass an empty string if there's no note to carry over.",
+          ),
+        reason: z
+          .string()
+          .describe(
+            "One short sentence explaining why these nodes are duplicates (shown to the user in the modal header).",
+          ),
+      })
+      .describe("The unified node to consolidate into."),
+  },
+  async (args) => {
+    // Validate sources exist and gather their state for the payload. Bailing
+    // here (rather than inside the transaction) gives a clean error message
+    // to the agent loop without bothering the user with a stillborn modal.
+    const sources: {
+      node: kg.Node;
+      edges: { edge: kg.Edge; node: kg.Node }[];
+      note: kg.NodeNote | null;
+    }[] = [];
+    for (const sid of args.sourceIds) {
+      const node = kg.getNode(sid);
+      if (!node) {
+        return { content: [{ type: "text", text: `Node ${sid} not found.` }] };
+      }
+      sources.push({
+        node,
+        edges: kg.neighbors({ nodeId: sid }),
+        note: kg.getNote(sid),
+      });
+    }
+
+    if (!kg.NODE_TYPES.includes(args.target.type as (typeof kg.NODE_TYPES)[number])) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Invalid target.type "${args.target.type}". Must be one of: ${kg.NODE_TYPES.join(", ")}.`,
+          },
+        ],
+      };
+    }
+
+    const payload = {
+      sources: sources.map((s) => ({
+        node: { id: s.node.id, name: s.node.name, type: s.node.type },
+        edges: s.edges.map(({ edge, node }) => ({
+          edgeType: edge.type,
+          direction: edge.fromId === s.node.id ? "out" : "in",
+          other: { id: node.id, name: node.name, type: node.type },
+        })),
+        note: s.note ? { body: s.note.body, updatedAt: s.note.updatedAt } : null,
+      })),
+      target: {
+        name: args.target.name,
+        type: args.target.type,
+        body: args.target.body,
+        reason: args.target.reason,
+      },
+    };
+
+    const response = await requestApproval("node_merge", payload);
+
+    switch (response.decision) {
+      case "approve": {
+        let result: kg.MergeNodesResult;
+        try {
+          result = kg.mergeNodes(args.sourceIds, {
+            name: args.target.name,
+            type: args.target.type,
+            body: args.target.body,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "Unknown error";
+          return {
+            content: [{ type: "text", text: `Merge failed: ${msg}` }],
+          };
+        }
+
+        // Re-embed the target in the background. Same posture as record-fact
+        // and import — failure is non-fatal, the cosine pass just skips this
+        // node until a future re-embed catches up.
+        embedNode(result.target).catch((err) =>
+          console.warn(
+            `[propose_node_merge] embedding failed for ${result.target.id}:`,
+            err,
+          ),
+        );
+
+        const summary =
+          `merged ${result.sourcesMerged.length} source${result.sourcesMerged.length === 1 ? "" : "s"}` +
+          ` into ${result.target.type} "${result.target.name}" (${result.target.id})` +
+          ` — ${result.edgesRewritten} edge${result.edgesRewritten === 1 ? "" : "s"} kept,` +
+          ` ${result.edgesDropped} dropped (self-loops + duplicates)`;
+        return { content: [{ type: "text", text: `applied — ${summary}.` }] };
+      }
+      case "deny":
+        return { content: [{ type: "text", text: "denied by user" }] };
+      case "tweak":
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ decision: "tweak", tweakText: response.tweakText }),
+            },
+          ],
+        };
+      case "timeout":
+        return {
+          content: [
+            {
+              type: "text",
+              text: "approval timed out — no merge happened. Ask the user if they still want to consolidate.",
+            },
+          ],
+        };
+    }
+  },
+);
+
 export const kgServer = createSdkMcpServer({
   name: "kg",
   version: "0.2.0",
@@ -374,6 +520,7 @@ export const kgServer = createSdkMcpServer({
     statsTool,
     approvalTestTool,
     proposeNoteEditTool,
+    proposeNodeMergeTool,
   ],
 });
 
@@ -389,4 +536,5 @@ export const KG_TOOL_NAMES = [
   "mcp__kg__stats",
   "mcp__kg__approval_test",
   "mcp__kg__propose_note_edit",
+  "mcp__kg__propose_node_merge",
 ];

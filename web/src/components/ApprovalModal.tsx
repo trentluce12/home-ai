@@ -69,7 +69,9 @@ export function ApprovalModal({ request, onResolved }: Props) {
     >
       <div
         className={`mx-4 w-full ${
-          request.kind === "note_edit" ? "max-w-3xl" : "max-w-lg"
+          request.kind === "note_edit" || request.kind === "node_merge"
+            ? "max-w-3xl"
+            : "max-w-lg"
         } rounded-2xl border border-zinc-800 bg-zinc-950 shadow-2xl`}
       >
         <div className="flex items-baseline justify-between border-b border-zinc-900 px-5 py-3">
@@ -178,8 +180,8 @@ function PayloadRender({ kind, payload }: { kind: string; payload: unknown }) {
   switch (kind) {
     case "note_edit":
       return <NoteEditPayload payload={payload} />;
-    // Real consumers land here as M5 phase 3 progresses, e.g.:
-    //   case "node_merge": return <NodeMergePayload payload={payload as ...} />;
+    case "node_merge":
+      return <NodeMergePayload payload={payload} />;
     default:
       return (
         <pre className="max-h-72 overflow-auto rounded-lg border border-zinc-900 bg-zinc-900/50 p-3 font-mono text-xs text-zinc-300">
@@ -249,6 +251,187 @@ function NoteEditPayload({ payload }: { payload: unknown }) {
         <NoteSide label="Before" body={before} />
         <NoteSide label="After" body={after} />
       </div>
+    </div>
+  );
+}
+
+/**
+ * Server-side payload shape for `node_merge` approvals. Mirrored from the
+ * `propose_node_merge` tool in `server/src/kg/tools.ts`. Each source carries
+ * a snapshot of its name/type, its 1-hop edges, and (if any) its current
+ * note body so the user can sanity-check what they're absorbing before
+ * approving — the merge is destructive (sources are deleted on approve).
+ */
+interface NodeMergeEdge {
+  edgeType: string;
+  direction: "in" | "out";
+  other: { id: string; name: string; type: string };
+}
+
+interface NodeMergeSource {
+  node: { id: string; name: string; type: string };
+  edges: NodeMergeEdge[];
+  note: { body: string; updatedAt: string } | null;
+}
+
+interface NodeMergePayloadShape {
+  sources: NodeMergeSource[];
+  target: { name: string; type: string; body: string; reason: string };
+}
+
+function isNodeMergePayload(p: unknown): p is NodeMergePayloadShape {
+  if (!p || typeof p !== "object") return false;
+  const o = p as Record<string, unknown>;
+  if (!Array.isArray(o.sources) || o.sources.length === 0) return false;
+  if (!o.target || typeof o.target !== "object") return false;
+  const t = o.target as Record<string, unknown>;
+  if (
+    typeof t.name !== "string" ||
+    typeof t.type !== "string" ||
+    typeof t.body !== "string" ||
+    typeof t.reason !== "string"
+  ) {
+    return false;
+  }
+  // Light-touch source validation — every source must have node + edges + note slot.
+  for (const s of o.sources) {
+    if (!s || typeof s !== "object") return false;
+    const so = s as Record<string, unknown>;
+    if (!so.node || typeof so.node !== "object") return false;
+    const sn = so.node as Record<string, unknown>;
+    if (
+      typeof sn.id !== "string" ||
+      typeof sn.name !== "string" ||
+      typeof sn.type !== "string"
+    ) {
+      return false;
+    }
+    if (!Array.isArray(so.edges)) return false;
+    if (so.note !== null && typeof so.note !== "object") return false;
+  }
+  return true;
+}
+
+/**
+ * Renders an agent-proposed node merge: the source nodes (with their 1-hop
+ * edges and any existing note bodies) on the left, the unified target on the
+ * right. The target is rendered read-only — the user can Tweak (returning
+ * prose to the agent) but can't edit the body inline (out of scope; see the
+ * task spec). Empty target body shows a "(no note)" placeholder so an
+ * intentional reset is visible rather than blank.
+ */
+function NodeMergePayload({ payload }: { payload: unknown }) {
+  if (!isNodeMergePayload(payload)) {
+    return (
+      <pre className="max-h-72 overflow-auto rounded-lg border border-zinc-900 bg-zinc-900/50 p-3 font-mono text-xs text-zinc-300">
+        {safeStringify(payload)}
+      </pre>
+    );
+  }
+  const { sources, target } = payload;
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-col gap-0.5">
+        <div className="text-xs uppercase tracking-wider text-zinc-500">
+          Merge {sources.length} node{sources.length === 1 ? "" : "s"} into
+        </div>
+        <div className="text-sm text-zinc-100">
+          <span className="text-zinc-500">{target.type}</span>{" "}
+          <span className="font-medium">{target.name}</span>
+        </div>
+      </div>
+      {target.reason && (
+        <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 px-3 py-2 text-xs text-zinc-300">
+          <span className="text-zinc-500">Reason: </span>
+          {target.reason}
+        </div>
+      )}
+      <div className="grid grid-cols-2 gap-2">
+        <div className="flex flex-col gap-2">
+          <div className="text-[10px] uppercase tracking-wider text-zinc-500">
+            Sources (will be deleted)
+          </div>
+          <div className="flex max-h-96 flex-col gap-2 overflow-auto">
+            {sources.map((s) => (
+              <SourceCard key={s.node.id} source={s} />
+            ))}
+          </div>
+        </div>
+        <div className="flex flex-col gap-2">
+          <div className="text-[10px] uppercase tracking-wider text-zinc-500">
+            Target (after merge)
+          </div>
+          <div className="flex max-h-96 flex-col gap-2 overflow-auto rounded-lg border border-zinc-800 bg-zinc-900/40 px-3 py-2">
+            <div className="text-xs text-zinc-400">
+              <span className="text-zinc-500">{target.type}</span>{" "}
+              <span className="text-zinc-100">{target.name}</span>
+            </div>
+            <div>
+              <div className="text-[10px] uppercase tracking-wider text-zinc-500">
+                Note body
+              </div>
+              <div className="mt-1 rounded border border-zinc-800/60 bg-zinc-900/40 px-2 py-1.5">
+                {target.body.trim().length === 0 ? (
+                  <span className="text-xs italic text-zinc-600">(no note)</span>
+                ) : (
+                  <div className={NOTE_DIFF_PROSE}>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                      {target.body}
+                    </ReactMarkdown>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SourceCard({ source }: { source: NodeMergeSource }) {
+  const { node, edges, note } = source;
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 px-3 py-2">
+      <div className="text-xs text-zinc-400">
+        <span className="text-zinc-500">{node.type}</span>{" "}
+        <span className="text-zinc-100">{node.name}</span>
+        <span className="ml-2 font-mono text-[10px] text-zinc-600">{node.id}</span>
+      </div>
+      {edges.length > 0 && (
+        <ul className="mt-1.5 flex flex-col gap-0.5 text-[11px] text-zinc-400">
+          {edges.map((e, i) => (
+            <li key={i} className="font-mono">
+              {e.direction === "out" ? (
+                <>
+                  <span className="text-zinc-500">— {e.edgeType} →</span>{" "}
+                  <span className="text-zinc-300">{e.other.name}</span>{" "}
+                  <span className="text-zinc-600">({e.other.type})</span>
+                </>
+              ) : (
+                <>
+                  <span className="text-zinc-300">{e.other.name}</span>{" "}
+                  <span className="text-zinc-600">({e.other.type})</span>{" "}
+                  <span className="text-zinc-500">— {e.edgeType} →</span>
+                </>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {edges.length === 0 && (
+        <div className="mt-1.5 text-[11px] italic text-zinc-600">no edges</div>
+      )}
+      {note && note.body.trim().length > 0 && (
+        <div className="mt-2">
+          <div className="text-[10px] uppercase tracking-wider text-zinc-500">note</div>
+          <div className="mt-0.5 rounded border border-zinc-800/60 bg-zinc-900/30 px-2 py-1">
+            <div className={NOTE_DIFF_PROSE}>
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{note.body}</ReactMarkdown>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

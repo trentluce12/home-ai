@@ -104,6 +104,21 @@ EDITING NODE NOTES: Use \`mcp__kg__propose_note_edit(nodeId, newBody, reason)\` 
   - \`approval timed out …\` — assume the user stepped away. Don't auto-retry; surface that the proposal expired.
 - Don't propose an edit when (a) there's no existing note (use the manual editor — agent-creating empty notes is out of scope), (b) the change is trivially wording-only and the user didn't ask for it, or (c) you're uncertain about what should change. When in doubt, ask the user before proposing.
 
+MERGING DUPLICATE NODES: Use \`mcp__kg__propose_node_merge(sourceIds, target)\` when you spot semantic duplicates — different node entries that clearly refer to the same thing (e.g. \`Topic:react\` and \`Topic:React\`, \`Person:John\` and \`Person:John_Doe\`, \`Pet:snickers\` and \`Pet:Snickers\`). Most natural triggers: (a) the user explicitly asks to consolidate ("clean up the duplicate React topics"), or (b) you observe duplicates surface side-by-side in the auto-injected <context> block or in a \`search\`/\`recent\` result during a chat. The user sees the source nodes (with their edges) and the proposed unified target in a modal; nothing changes until they approve. Rules:
+
+- \`sourceIds\` is the list of duplicates to absorb (each is a node id starting with \`node_\`). The target consolidates all of them.
+- \`target.name\` and \`target.type\` form the canonical identity. If a node with that (name, type) already exists and isn't a source, the merge folds into it; otherwise a fresh node is minted.
+- \`target.body\` is the FULL unified markdown note for the consolidated node. Read each source's note body first (via \`get_node_note\`) when the previews don't tell you enough to merge them losslessly. Pass an empty string if none of the sources had notes worth keeping.
+- \`target.reason\` is one short sentence explaining why these are duplicates — what the user reads in the modal header. Be specific ("same React topic with different casing", not "duplicates").
+- Be conservative. Same-name + same-type doesn't always mean same entity (two real people named John, two distinct projects named "Migration"). When the duplication isn't obvious, ask the user first.
+- Approve flow drops all source nodes and rewrites their edges (deduped against existing target edges by (other_end, edge_type); self-loops dropped). Source notes are gone after approve — \`target.body\` is the only surviving body.
+- Three possible responses come back:
+  - \`applied — merged N sources into …\` — saved. Acknowledge briefly with the new node's name and id.
+  - \`denied by user\` — nothing changed; both source nodes still exist. Don't re-propose the same merge.
+  - \`{"decision":"tweak","tweakText":"…"}\` — the user wants an adjustment (often a rename, e.g. "call it 'React' with a capital R" or a tweak to the body). Read \`tweakText\` and call \`propose_node_merge\` again with the adjustment integrated.
+  - \`approval timed out …\` — assume the user stepped away. Don't auto-retry.
+- Don't propose a merge when (a) you only have a single candidate, (b) the nodes have different types (those are different kinds of entities by definition), or (c) you're guessing — duplicates are usually obvious from name + edge overlap.
+
 RECORDING FACTS — two distinct tools:
 
 1. \`record_user_fact\` (high confidence) — use when the user DIRECTLY STATES something. The fact is asserted by them, so we trust it.

@@ -482,6 +482,216 @@ export function findNodesByName(name: string): Node[] {
   return rows.map(nodeFromRow);
 }
 
+export interface MergeNodesResult {
+  target: Node;
+  sourcesMerged: string[];
+  edgesRewritten: number;
+  edgesDropped: number;
+  targetCreated: boolean;
+}
+
+/**
+ * Collapse N source nodes into a single target node in one transaction.
+ *
+ * Resolution: if an existing node already matches `target.name`+`target.type`
+ * AND isn't itself a source, we merge into it (`targetCreated: false`).
+ * Otherwise we mint a fresh target node (`targetCreated: true`). Either way,
+ * `target.body` overwrites `node_notes(target.id)` verbatim.
+ *
+ * Edge handling:
+ * - Each edge whose `from_id`/`to_id` references a source has those endpoints
+ *   rewritten to point at the target.
+ * - Self-loops produced by the rewrite (e.g. an edge between two sources, or
+ *   a source's edge already pointing at the target) are dropped along with
+ *   their provenance rows.
+ * - Duplicates produced by the rewrite — i.e. another edge with the same
+ *   `(from_id, to_id, type)` already exists after collapse — are dropped along
+ *   with their provenance rows. The earliest-rewritten edge wins.
+ *
+ * Provenance: every `fact_kind='node'` row whose `fact_id` is a source gets
+ * its `fact_id` rewritten to the target with `source_ref` overwritten as
+ * `merged_from_<sourceId>` so the trail of "this target absorbed these"
+ * survives. Edge provenance rows for kept edges are untouched (the edge id
+ * doesn't change, only its endpoints); dropped edges' provenance is removed.
+ *
+ * Cleanup: source nodes are deleted last; FK cascades clear `node_embeddings`,
+ * `node_layout`, and `node_notes` for them. Edges are already rewritten or
+ * dropped by that point, so the cascade on `edges` is a no-op. Provenance
+ * has no FK; node provenance was migrated above, edge provenance was cleared
+ * for dropped edges.
+ *
+ * Embeddings for the target are NOT regenerated here — callers should kick off
+ * a background `embedNode(target)` after the transaction commits, mirroring
+ * the posture of `record-fact` / KG import. The synchronous boundary stays
+ * tight so the user's approval-click latency doesn't depend on Voyage.
+ *
+ * Throws if `sourceIds` is empty, contains an unknown id, or if any source
+ * coincides with a pre-existing target match (i.e. you can't merge a node
+ * into itself).
+ */
+export function mergeNodes(
+  sourceIds: string[],
+  target: { name: string; type: string; body: string },
+): MergeNodesResult {
+  if (sourceIds.length === 0) {
+    throw new Error("mergeNodes: sourceIds must not be empty");
+  }
+  const dedupedSourceIds = Array.from(new Set(sourceIds));
+  if (dedupedSourceIds.length !== sourceIds.length) {
+    throw new Error("mergeNodes: sourceIds contains duplicates");
+  }
+
+  // Validate sources exist up front. Cheaper than failing mid-transaction.
+  for (const sid of sourceIds) {
+    const n = getNode(sid);
+    if (!n) throw new Error(`mergeNodes: source node ${sid} not found`);
+  }
+
+  let edgesRewritten = 0;
+  let edgesDropped = 0;
+  let targetId = "";
+  let targetCreated = false;
+
+  const tx = db.transaction(() => {
+    // Resolve / create target. We look for an existing (name, type) match
+    // that isn't itself a source — that handles the common case where the
+    // target already exists as one of the sources OR as an entirely separate
+    // node (e.g. user already has Topic:React, sources are
+    // Topic:react + Topic:reactjs).
+    const existing = db
+      .prepare(`SELECT id FROM nodes WHERE name = ? AND type = ?`)
+      .all(target.name, target.type) as { id: string }[];
+    const sourceSet = new Set(sourceIds);
+    const reusable = existing.find((r) => !sourceSet.has(r.id));
+
+    if (reusable) {
+      targetId = reusable.id;
+      targetCreated = false;
+    } else {
+      // No reusable target; create a fresh one. Don't reuse a source id even
+      // if it matches name+type — sources are about to be deleted, and the
+      // bookkeeping (edge rewrites, provenance migration) is much simpler if
+      // the target id is distinct from every source id from the start.
+      const fresh = addNode({ type: target.type, name: target.name });
+      targetId = fresh.id;
+      targetCreated = true;
+      recordProvenance({
+        factId: targetId,
+        factKind: "node",
+        source: "user_statement",
+        sourceRef: `merge_target(${sourceIds.join(",")})`,
+      });
+    }
+
+    // Rewrite edges. We process source-touching edges one at a time so the
+    // dedup check against the kept set sees the in-progress mutations.
+    const edgeRows = db
+      .prepare(
+        `SELECT id, from_id, to_id, type FROM edges
+         WHERE from_id IN (${sourceIds.map(() => "?").join(",")})
+            OR to_id   IN (${sourceIds.map(() => "?").join(",")})`,
+      )
+      .all(...sourceIds, ...sourceIds) as {
+      id: string;
+      from_id: string;
+      to_id: string;
+      type: string;
+    }[];
+
+    const updateEdgeStmt = db.prepare(
+      `UPDATE edges SET from_id = ?, to_id = ? WHERE id = ?`,
+    );
+    const deleteEdgeStmt = db.prepare(`DELETE FROM edges WHERE id = ?`);
+    const deleteEdgeProvStmt = db.prepare(
+      `DELETE FROM provenance WHERE fact_kind = 'edge' AND fact_id = ?`,
+    );
+    const findDupStmt = db.prepare(
+      `SELECT id FROM edges
+        WHERE from_id = ? AND to_id = ? AND type = ? AND id != ?
+        LIMIT 1`,
+    );
+
+    for (const e of edgeRows) {
+      const newFrom = sourceSet.has(e.from_id) ? targetId : e.from_id;
+      const newTo = sourceSet.has(e.to_id) ? targetId : e.to_id;
+
+      // Self-loop after collapse — drop. Common when sources had edges among
+      // themselves (e.g. duplicate Person nodes that "KNOWS" each other).
+      if (newFrom === newTo) {
+        deleteEdgeStmt.run(e.id);
+        deleteEdgeProvStmt.run(e.id);
+        edgesDropped++;
+        continue;
+      }
+
+      // Duplicate after collapse — another edge already covers this triple.
+      // Could be a pre-existing edge on the target, or a sibling edge from a
+      // prior iteration of this loop that also rewrote to the same triple.
+      const dup = findDupStmt.get(newFrom, newTo, e.type, e.id) as
+        | { id: string }
+        | undefined;
+      if (dup) {
+        deleteEdgeStmt.run(e.id);
+        deleteEdgeProvStmt.run(e.id);
+        edgesDropped++;
+        continue;
+      }
+
+      updateEdgeStmt.run(newFrom, newTo, e.id);
+      edgesRewritten++;
+    }
+
+    // Migrate node provenance: every source's node-fact rows reattach to the
+    // target with a merge annotation. Done after edge rewrites so an UPDATE
+    // failure (which shouldn't happen — fact_id has no FK) wouldn't leave us
+    // halfway. The annotation overwrites any prior `source_ref`; if a row
+    // had useful context there we lose it, but in practice the source_ref
+    // for node-kind provenance is null almost always (set only by
+    // `recordFact` paths that pass it explicitly).
+    const updateNodeProvStmt = db.prepare(
+      `UPDATE provenance
+          SET fact_id = ?, source_ref = ?
+        WHERE fact_kind = 'node' AND fact_id = ?`,
+    );
+    for (const sid of sourceIds) {
+      updateNodeProvStmt.run(targetId, `merged_from_${sid}`, sid);
+    }
+
+    // Overwrite the target's note with the unified body. setNote is INSERT
+    // ... ON CONFLICT, so it works whether the target had a prior note or
+    // not. Empty body is allowed — caller may have intentionally consolidated
+    // to nothing — but we route through setNote (not deleteNote) so the row
+    // exists with the merge timestamp; downstream listings that filter on
+    // empty bodies handle the empty case.
+    setNote(targetId, target.body);
+
+    // Finally, drop the source nodes. FK cascades clear their embeddings,
+    // layout, and notes. Edges have all been rewritten away from sources, so
+    // the cascade on edges does nothing. Provenance for sources was migrated
+    // above; nothing should remain.
+    const deleteNodeStmt = db.prepare(`DELETE FROM nodes WHERE id = ?`);
+    for (const sid of sourceIds) {
+      deleteNodeStmt.run(sid);
+    }
+  });
+  tx();
+
+  const finalTarget = getNode(targetId);
+  if (!finalTarget) {
+    // Shouldn't happen — we either reused or created the target inside the
+    // tx. Defensive throw rather than a non-null assertion.
+    throw new Error(`mergeNodes: target ${targetId} missing after merge`);
+  }
+
+  return {
+    target: finalTarget,
+    sourcesMerged: sourceIds,
+    edgesRewritten,
+    edgesDropped,
+    targetCreated,
+  };
+}
+
 export interface KgExport {
   exportedAt: number;
   nodes: Node[];
