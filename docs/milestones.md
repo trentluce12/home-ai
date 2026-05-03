@@ -74,9 +74,13 @@ Split into three phases; each ships independently.
 - [x] Seed expanded to 17 nodes / 20 edges (project + tech stack + service providers + topic space) so the graph isn't a single dot.
 - [x] Smoke tests: graph opens with FA2 settling, hover highlights, click opens detail panel, filter chips hide/show types, live-refreshes on chat completion.
 
-### Phase 3 — bulk import (deferred)
+### Phase 3 — bulk import (shipped ✓)
 
-Stories tracked in `tasks/planned/` (`m4p3-*`).
+- [x] JSON KG import endpoint (`POST /api/kg/import`): accepts the export shape, inserts nodes/edges under a new `bulk_import` provenance source, default skip-merge on `(name, type)` collision, opt-in replace-all wipes first. Single transaction with fresh IDs and edges rewired via id-map; background re-embed of inserted nodes.
+- [x] Dashboard "Import" section: file picker + replace-all checkbox + browser `confirm()` gate. Round-trips the JSON export — useful for backup restore and cross-machine migration.
+- [x] Obsidian-vault ingestion via system-prompt flow: chat agent walks a vault with `Read`+`Glob`, calls `mcp__kg__record_user_fact`, uses `mcp__kg__neighbors` to dedupe before insert. Triggered by `/import-obsidian <path>` or free-form request. Companion `.claude/commands/import-obsidian.md` reference card.
+
+Smoke tests: JSON round-trip (default-merge skips known nodes, replace-all reseeds the snapshot, transactional rollback on partial failure). Obsidian flow is manual — exercise via chat with a real vault path.
 
 ## M4.5 — production deployment + auth (shipped ✓)
 
