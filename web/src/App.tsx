@@ -51,6 +51,33 @@ export default function App() {
   return <ChatShell onLogout={() => setAuthState("anon")} />;
 }
 
+// Closed-state for the contextual memory panel persists per browser session
+// (sessionStorage), so once the user dismisses it via the X they aren't
+// nagged again on every chat-switch within the same tab. A new tab/window
+// re-opens with the panel back to default. Failures (Safari private mode,
+// disabled storage) silently fall back to "open."
+const MEMORY_CLOSED_STORAGE_KEY = "home-ai:memory-panel:closed";
+
+function loadMemoryPanelClosed(): boolean {
+  try {
+    return sessionStorage.getItem(MEMORY_CLOSED_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function saveMemoryPanelClosed(closed: boolean): void {
+  try {
+    if (closed) {
+      sessionStorage.setItem(MEMORY_CLOSED_STORAGE_KEY, "1");
+    } else {
+      sessionStorage.removeItem(MEMORY_CLOSED_STORAGE_KEY);
+    }
+  } catch {
+    // ignore — sessionStorage failures shouldn't break panel toggling
+  }
+}
+
 function ChatShell({ onLogout }: { onLogout: () => void }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [memoryEvents, setMemoryEvents] = useState<MemoryEvent[]>([]);
@@ -60,6 +87,9 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [graphOpen, setGraphOpen] = useState(false);
+  const [memoryPanelClosed, setMemoryPanelClosed] = useState<boolean>(() =>
+    loadMemoryPanelClosed(),
+  );
   // When the dashboard "notes" panel opens the graph, it passes the node ID
   // so GraphView can focus + populate its detail panel automatically. Reset
   // to null on close so a subsequent toolbar-button open doesn't re-focus.
@@ -292,6 +322,11 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
     }
   }
 
+  function handleCloseMemoryPanel() {
+    setMemoryPanelClosed(true);
+    saveMemoryPanelClosed(true);
+  }
+
   async function handleLogout() {
     if (streaming) abortRef.current?.abort();
     try {
@@ -383,7 +418,11 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
           )}
         </main>
 
-        <MemoryPanel events={memoryEvents} />
+        <MemoryPanel
+          events={memoryEvents}
+          visible={!empty && !memoryPanelClosed}
+          onClose={handleCloseMemoryPanel}
+        />
       </div>
 
       <footer className="shrink-0 border-t border-zinc-900/80 px-6 py-4">
