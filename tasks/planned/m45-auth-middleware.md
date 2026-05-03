@@ -6,4 +6,6 @@
 
 **Files:** `server/src/auth/middleware.ts` (new), `server/src/index.ts`
 
+**Dependencies:** m45-auth-routes, m45-api-prefix
+
 **Estimate:** TBD

@@ -6,4 +6,6 @@
 
 **Files:** `web/src/components/Login.tsx` (new), `web/src/App.tsx`
 
+**Dependencies:** m45-auth-routes, m45-api-prefix
+
 **Estimate:** TBD

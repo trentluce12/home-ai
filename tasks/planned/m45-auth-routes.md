@@ -6,4 +6,6 @@
 
 **Files:** `server/src/routes/auth.ts` (new) or inline in `server/src/index.ts`
 
+**Dependencies:** m45-auth-sessions-table
+
 **Estimate:** TBD
