@@ -208,6 +208,24 @@ const updateNodeTool = tool(
   },
 );
 
+const getNodeNoteTool = tool(
+  "get_node_note",
+  "Fetch the full markdown body of a node's free-form note. Use when the inline preview in the auto-injected <context> block is cut off mid-sentence on the topic the user just asked about, or when the user clearly wants detail past the preview boundary. Returns the full body verbatim, or 'no note' if the node has none.",
+  {
+    id: z.string().describe("Node ID (starts with 'node_')"),
+  },
+  async (args) => {
+    const node = kg.getNode(args.id);
+    if (!node) {
+      return { content: [{ type: "text", text: `Node ${args.id} not found.` }] };
+    }
+    const note = kg.getNote(args.id);
+    return {
+      content: [{ type: "text", text: note ? note.body : "no note" }],
+    };
+  },
+);
+
 const recentTool = tool(
   "recent",
   "List recently created or updated nodes. Useful for introspection — 'what have I been remembering?'",
@@ -260,6 +278,7 @@ export const kgServer = createSdkMcpServer({
     recordUserFactTool,
     recordInferredFactTool,
     updateNodeTool,
+    getNodeNoteTool,
     recentTool,
     statsTool,
     approvalTestTool,
@@ -273,6 +292,7 @@ export const KG_TOOL_NAMES = [
   "mcp__kg__record_user_fact",
   "mcp__kg__record_inferred_fact",
   "mcp__kg__update_node",
+  "mcp__kg__get_node_note",
   "mcp__kg__recent",
   "mcp__kg__stats",
   "mcp__kg__approval_test",

@@ -1,5 +1,23 @@
-import { db, getAllEmbeddings, neighbors, type Node, type Edge } from "./db.js";
+import { db, getAllEmbeddings, getNote, neighbors, type Node, type Edge } from "./db.js";
 import { embedQuery } from "../embeddings/index.js";
+
+const NOTE_PREVIEW_CHARS = 200;
+
+/**
+ * First ~200 chars of a note body, with internal whitespace collapsed so the
+ * preview reads as a single line. Marker (`…`) appended only when the body
+ * actually exceeded the limit, so a sub-200-char note doesn't gain a misleading
+ * truncation indicator. Returns null when the node has no note — caller drops
+ * the preview line entirely (clean omission, not an empty string).
+ */
+function buildNotePreview(nodeId: string): string | null {
+  const note = getNote(nodeId);
+  if (!note) return null;
+  const collapsed = note.body.replace(/\s+/g, " ").trim();
+  if (collapsed.length === 0) return null;
+  if (collapsed.length <= NOTE_PREVIEW_CHARS) return collapsed;
+  return collapsed.slice(0, NOTE_PREVIEW_CHARS).trimEnd() + "…";
+}
 
 const STOPWORDS = new Set([
   "the",
@@ -281,6 +299,33 @@ export async function retrieveSubgraph(
   }
   for (const r of orphanRoots) {
     lines.push(`- ${r.name} (${r.type})`);
+  }
+
+  // Append note previews for any retrieved node that has one. Dedup by node id
+  // (a node mentioned in multiple edges shouldn't show twice). Order mirrors
+  // first-mention order in the formatted block — roots first, then any other
+  // edge-end node we picked up — so the prose lines up with the facts above.
+  // Nodes without notes contribute nothing (clean omission, not an empty
+  // string), so the block stays tight.
+  const notedIds = new Set<string>();
+  const noteOrder: Node[] = [];
+  for (const r of roots) {
+    if (!notedIds.has(r.id)) {
+      notedIds.add(r.id);
+      noteOrder.push(r);
+    }
+  }
+  for (const e of edges) {
+    for (const n of [e.from, e.to]) {
+      if (!notedIds.has(n.id)) {
+        notedIds.add(n.id);
+        noteOrder.push(n);
+      }
+    }
+  }
+  for (const n of noteOrder) {
+    const preview = buildNotePreview(n.id);
+    if (preview) lines.push(`- note (${n.name}): ${preview}`);
   }
 
   return {

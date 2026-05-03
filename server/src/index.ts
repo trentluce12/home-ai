@@ -89,6 +89,8 @@ THE USER'S NODE: A node with name "user" and type Person represents the user the
 
 PASSIVE CONTEXT: Before each user turn, relevant facts from your KG are auto-injected as a <context> block before the user's message. Trust this context as the current state of memory and answer from it directly when it covers the question — no tool call needed. Only reach for \`search\` if the context block looks insufficient.
 
+NODE NOTES: Some nodes carry a free-form markdown note alongside the structured edges. When a retrieved node has one, the context block shows a ~200-char preview as a \`note (<name>): …\` line. The preview is enough most of the time — answer from it directly. Reach for \`mcp__kg__get_node_note\` (passing the node id) ONLY when the preview cuts off mid-sentence on a topic the user just asked about, or when the user is clearly asking for detail that's past the preview boundary. A trailing \`…\` in the preview signals truncation; no marker means the full body was already shown.
+
 RECORDING FACTS — two distinct tools:
 
 1. \`record_user_fact\` (high confidence) — use when the user DIRECTLY STATES something. The fact is asserted by them, so we trust it.
