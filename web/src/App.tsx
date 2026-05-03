@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { ArrowDown, ArrowUp, LogOut, Network, Square } from "lucide-react";
+import { ArrowDown, ArrowUp, LogOut, Square } from "lucide-react";
 import { MessageBubble } from "./components/MessageBubble";
 import { MemoryPanel } from "./components/MemoryPanel";
-import { SessionList } from "./components/SessionList";
+import { Sidebar } from "./components/Sidebar";
 import { EmptyDashboard } from "./components/EmptyDashboard";
 import { GraphView } from "./components/GraphView";
 import { Login } from "./components/Login";
@@ -318,14 +318,6 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
             <span className="text-xs text-zinc-500 animate-pulse">thinking…</span>
           )}
           <button
-            onClick={() => setGraphOpen(true)}
-            aria-label="open memory graph"
-            title="Memory graph"
-            className="flex h-7 w-7 items-center justify-center rounded text-zinc-400 transition hover:bg-zinc-900 hover:text-zinc-100"
-          >
-            <Network className="h-3.5 w-3.5" />
-          </button>
-          <button
             onClick={handleLogout}
             aria-label="log out"
             title="Log out"
@@ -337,11 +329,17 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
       </header>
 
       <div className="flex flex-1 min-h-0 overflow-hidden">
-        <SessionList
+        <Sidebar
           currentSessionId={sessionId}
-          onSelect={handleSelectSession}
-          onNew={handleNewChat}
+          onSelectSession={handleSelectSession}
+          onNewChat={handleNewChat}
           refreshKey={refreshKey}
+          onOpenGraph={() => setGraphOpen(true)}
+          onOpenNotes={() => {
+            // Notes view lands in m6p2; this is a no-op placeholder so the
+            // button is wired and keyboard-discoverable in phase 1.
+            alert("Notes view coming in phase 2.");
+          }}
         />
 
         <main
