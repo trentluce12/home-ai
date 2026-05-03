@@ -40,7 +40,7 @@ Create `.env` next to `docker-compose.yml`. Required:
   ```sh
   cd server && node -e "console.log(require('bcrypt').hashSync(process.argv[1], 12))" 'mypassword'
   ```
-  Copy the resulting `$2b$12$...` string into `.env`. Don't quote it — `.env` parses it raw.
+  Copy the resulting `$2b$12$...` string into `.env`, but **double every `$`** to escape Docker Compose's variable interpolation — the actual `.env` line should be `HOME_AI_PASSWORD_HASH=$$2b$$12$$<rest-of-hash>`. Without escaping, compose silently drops everything after each unescaped `$` and the container ends up with a truncated hash that no password matches. (For non-Docker bare-server runs the raw hash works fine.)
 - `ANTHROPIC_API_KEY` — your Anthropic key (claude-opus-4-7).
 - `VOYAGE_API_KEY` — your Voyage key (used for `voyage-3-large` embeddings; retrieval falls back to FTS-only if unset, but you'll lose semantic recall).
 
