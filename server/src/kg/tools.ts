@@ -268,6 +268,97 @@ const approvalTestTool = tool(
   },
 );
 
+// First real consumer of the approval modal (m5p2). Builds a `note_edit`
+// payload from the current note body + the proposed `new_body`, blocks until
+// the user decides, and writes only on approve. The modal renders a
+// before/after diff view; tweak feeds the user's adjustment text back into
+// the agent loop so it can re-propose with that guidance.
+const proposeNoteEditTool = tool(
+  "propose_note_edit",
+  "Propose an edit to a node's free-form markdown note. The user sees a before/after diff and approves, denies, or tweaks the proposal. Use when the user shares richer or updated context that should land in an existing note (e.g., they just told you the pet's age changed, or consolidated overlapping info during a chat). On approve the new body is saved verbatim. On deny nothing changes. On tweak the user's adjustment text is returned so you can re-propose a tightened edit.",
+  {
+    nodeId: z
+      .string()
+      .describe("Node ID whose note to edit (must already exist; starts with 'node_')."),
+    newBody: z
+      .string()
+      .describe(
+        "Proposed full markdown body. This replaces the existing body verbatim — write the complete note, not a diff or patch.",
+      ),
+    reason: z
+      .string()
+      .describe(
+        "One short sentence explaining the change for the user reviewing the diff (e.g., 'updated age to 5 from new chat context').",
+      ),
+  },
+  async (args) => {
+    const node = kg.getNode(args.nodeId);
+    if (!node) {
+      return {
+        content: [{ type: "text", text: `Node ${args.nodeId} not found.` }],
+      };
+    }
+    const existing = kg.getNote(args.nodeId);
+    const before = existing?.body ?? "";
+
+    // No-op edit: short-circuit before bothering the user with a diff that
+    // changes nothing. The agent occasionally re-proposes verbatim; this keeps
+    // the modal honest.
+    if (before === args.newBody) {
+      return {
+        content: [
+          { type: "text", text: "No change — proposed body matches the current note." },
+        ],
+      };
+    }
+
+    const payload = {
+      node: { id: node.id, name: node.name, type: node.type },
+      before,
+      after: args.newBody,
+      reason: args.reason,
+    };
+    const response = await requestApproval("note_edit", payload);
+
+    switch (response.decision) {
+      case "approve": {
+        const saved = kg.setNote(args.nodeId, args.newBody);
+        return {
+          content: [
+            {
+              type: "text",
+              text: `applied — note on ${node.type} "${node.name}" updated at ${saved.updatedAt}.`,
+            },
+          ],
+        };
+      }
+      case "deny":
+        return { content: [{ type: "text", text: "denied by user" }] };
+      case "tweak":
+        // Hand the user's adjustment text back to the agent loop. Returning
+        // structured JSON (not just the prose) so the agent sees this is a
+        // tweak response and not free-form chat context.
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ decision: "tweak", tweakText: response.tweakText }),
+            },
+          ],
+        };
+      case "timeout":
+        return {
+          content: [
+            {
+              type: "text",
+              text: "approval timed out — note unchanged. Ask the user if they still want this edit.",
+            },
+          ],
+        };
+    }
+  },
+);
+
 export const kgServer = createSdkMcpServer({
   name: "kg",
   version: "0.2.0",
@@ -282,6 +373,7 @@ export const kgServer = createSdkMcpServer({
     recentTool,
     statsTool,
     approvalTestTool,
+    proposeNoteEditTool,
   ],
 });
 
@@ -296,4 +388,5 @@ export const KG_TOOL_NAMES = [
   "mcp__kg__recent",
   "mcp__kg__stats",
   "mcp__kg__approval_test",
+  "mcp__kg__propose_note_edit",
 ];

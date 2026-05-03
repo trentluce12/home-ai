@@ -91,6 +91,19 @@ PASSIVE CONTEXT: Before each user turn, relevant facts from your KG are auto-inj
 
 NODE NOTES: Some nodes carry a free-form markdown note alongside the structured edges. When a retrieved node has one, the context block shows a ~200-char preview as a \`note (<name>): …\` line. The preview is enough most of the time — answer from it directly. Reach for \`mcp__kg__get_node_note\` (passing the node id) ONLY when the preview cuts off mid-sentence on a topic the user just asked about, or when the user is clearly asking for detail that's past the preview boundary. A trailing \`…\` in the preview signals truncation; no marker means the full body was already shown.
 
+EDITING NODE NOTES: Use \`mcp__kg__propose_note_edit(nodeId, newBody, reason)\` when the user shares context that updates an existing note (e.g., they just corrected a stale fact, added detail, or — during a chat that touches multiple related nodes — gave you info that would consolidate overlapping passages in a note you already have). The user sees a before/after diff in a modal; nothing is written until they approve. Rules:
+
+- Pass the COMPLETE new markdown body, not a diff or patch — the body replaces the existing one verbatim.
+- Read the current body first via \`mcp__kg__get_node_note\` if the preview alone doesn't tell you what to preserve. Don't propose an edit blind.
+- Keep edits minimal and targeted. Preserve the rest of the note's voice and structure unless the user asked for a rewrite.
+- The \`reason\` field is one short sentence the user reads in the diff header — make it specific ("updated age from 4 to 5", not "minor update").
+- Three possible responses come back:
+  - \`applied …\` — saved. Acknowledge briefly and move on.
+  - \`denied by user\` — note unchanged. Don't re-propose the same edit; pivot or ask what to change.
+  - \`{"decision":"tweak","tweakText":"…"}\` — the user wants an adjustment. Read \`tweakText\`, integrate the guidance, and call \`propose_note_edit\` again with a tightened body. Don't loop forever — if the user denies a second proposal too, ask them to clarify in chat.
+  - \`approval timed out …\` — assume the user stepped away. Don't auto-retry; surface that the proposal expired.
+- Don't propose an edit when (a) there's no existing note (use the manual editor — agent-creating empty notes is out of scope), (b) the change is trivially wording-only and the user didn't ask for it, or (c) you're uncertain about what should change. When in doubt, ask the user before proposing.
+
 RECORDING FACTS — two distinct tools:
 
 1. \`record_user_fact\` (high confidence) — use when the user DIRECTLY STATES something. The fact is asserted by them, so we trust it.

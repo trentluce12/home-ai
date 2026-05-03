@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, Pencil, X } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { api, type ApprovalDecision, type ApprovalRequest } from "../lib/api";
 
 interface Props {
@@ -65,7 +67,11 @@ export function ApprovalModal({ request, onResolved }: Props) {
       aria-modal="true"
       aria-label="approval request"
     >
-      <div className="mx-4 w-full max-w-lg rounded-2xl border border-zinc-800 bg-zinc-950 shadow-2xl">
+      <div
+        className={`mx-4 w-full ${
+          request.kind === "note_edit" ? "max-w-3xl" : "max-w-lg"
+        } rounded-2xl border border-zinc-800 bg-zinc-950 shadow-2xl`}
+      >
         <div className="flex items-baseline justify-between border-b border-zinc-900 px-5 py-3">
           <div className="flex items-baseline gap-2">
             <span className="text-sm font-medium text-zinc-100">Agent wants to</span>
@@ -164,14 +170,15 @@ export function ApprovalModal({ request, onResolved }: Props) {
 }
 
 /**
- * Per-`kind` payload rendering. Future tools (`note_edit`, `node_merge`) add
- * their own branches; the default is a JSON dump so unknown kinds still show
- * something useful.
+ * Per-`kind` payload rendering. Future tools (`node_merge`) add their own
+ * branches; the default is a JSON dump so unknown kinds still show something
+ * useful.
  */
 function PayloadRender({ kind, payload }: { kind: string; payload: unknown }) {
   switch (kind) {
-    // Real consumers land here as M5 phase 2 / 3 progress, e.g.:
-    //   case "note_edit": return <NoteEditPayload payload={payload as ...} />;
+    case "note_edit":
+      return <NoteEditPayload payload={payload} />;
+    // Real consumers land here as M5 phase 3 progresses, e.g.:
     //   case "node_merge": return <NodeMergePayload payload={payload as ...} />;
     default:
       return (
@@ -181,6 +188,105 @@ function PayloadRender({ kind, payload }: { kind: string; payload: unknown }) {
       );
   }
 }
+
+/**
+ * Server-side payload shape for `note_edit` approvals. Mirrored from the
+ * `propose_note_edit` tool in `server/src/kg/tools.ts`. Kept narrow — we
+ * don't carry the full Node, only the bits the modal needs to render.
+ */
+interface NoteEditPayloadShape {
+  node: { id: string; name: string; type: string };
+  before: string;
+  after: string;
+  reason: string;
+}
+
+function isNoteEditPayload(p: unknown): p is NoteEditPayloadShape {
+  if (!p || typeof p !== "object") return false;
+  const o = p as Record<string, unknown>;
+  if (typeof o.before !== "string") return false;
+  if (typeof o.after !== "string") return false;
+  if (typeof o.reason !== "string") return false;
+  if (!o.node || typeof o.node !== "object") return false;
+  const n = o.node as Record<string, unknown>;
+  return (
+    typeof n.id === "string" && typeof n.name === "string" && typeof n.type === "string"
+  );
+}
+
+/**
+ * Side-by-side before/after for an agent-proposed note rewrite. Each side
+ * renders as markdown via the same `prose-invert`-based styling the manual
+ * note editor uses, so the diff reads in the same visual language. Empty
+ * `before` (no existing note) shows a subtle placeholder rather than an
+ * empty box, since that case is rare-but-possible if a node had its note
+ * deleted between the agent's read and its proposal.
+ */
+function NoteEditPayload({ payload }: { payload: unknown }) {
+  if (!isNoteEditPayload(payload)) {
+    return (
+      <pre className="max-h-72 overflow-auto rounded-lg border border-zinc-900 bg-zinc-900/50 p-3 font-mono text-xs text-zinc-300">
+        {safeStringify(payload)}
+      </pre>
+    );
+  }
+  const { node, before, after, reason } = payload;
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-col gap-0.5">
+        <div className="text-xs uppercase tracking-wider text-zinc-500">
+          Note on {node.type}
+        </div>
+        <div className="text-sm text-zinc-100">{node.name}</div>
+      </div>
+      {reason && (
+        <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 px-3 py-2 text-xs text-zinc-300">
+          <span className="text-zinc-500">Reason: </span>
+          {reason}
+        </div>
+      )}
+      <div className="grid grid-cols-2 gap-2">
+        <NoteSide label="Before" body={before} />
+        <NoteSide label="After" body={after} />
+      </div>
+    </div>
+  );
+}
+
+function NoteSide({ label, body }: { label: string; body: string }) {
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="text-[10px] uppercase tracking-wider text-zinc-500">{label}</div>
+      <div className="max-h-72 min-h-[6rem] overflow-auto rounded-lg border border-zinc-800 bg-zinc-900/40 px-3 py-2">
+        {body.trim().length === 0 ? (
+          <span className="text-xs italic text-zinc-600">(empty)</span>
+        ) : (
+          <div className={NOTE_DIFF_PROSE}>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{body}</ReactMarkdown>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Same family as `NOTE_PROSE` in GraphView — kept local to the modal so the
+// two callers can drift independently if needed (the modal's diff sides are
+// narrow columns; the panel editor is a single column). Trimmed to the rules
+// that matter for short before/after blobs.
+const NOTE_DIFF_PROSE = [
+  "prose prose-invert prose-xs max-w-none",
+  "prose-p:my-1 prose-p:leading-relaxed prose-p:text-xs",
+  "prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5 prose-li:text-xs",
+  "prose-headings:text-zinc-100 prose-headings:font-medium prose-headings:my-1.5",
+  "prose-strong:text-zinc-100",
+  "prose-em:text-zinc-200",
+  "prose-a:text-sky-400 prose-a:no-underline hover:prose-a:underline",
+  "prose-code:bg-zinc-900 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:text-zinc-200 prose-code:text-[0.8em] prose-code:font-mono prose-code:before:content-none prose-code:after:content-none",
+  "prose-pre:bg-zinc-900 prose-pre:border prose-pre:border-zinc-800 prose-pre:rounded prose-pre:my-1.5",
+  "prose-blockquote:border-l-zinc-700 prose-blockquote:text-zinc-400",
+  "prose-hr:border-zinc-800",
+].join(" ");
 
 function safeStringify(value: unknown): string {
   try {
