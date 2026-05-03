@@ -97,6 +97,23 @@ Smoke tests: JSON round-trip (default-merge skips known nodes, replace-all resee
 
 Smoke test: `docker compose up` on a clean machine, set env, hit URL, log in, send a chat, kill container, recreate, KG and sessions persist.
 
-## M5 — notes layer (planned, design pending)
+## M5 — node-attached notes layer (planned)
 
-Layered knowledge base: facts (today's KG, structured) + notes (free-form markdown) + cross-layer links. Recording-rules and UX still being designed; see the in-progress design entry once it lands.
+Free-form markdown notes attached 1:1 to KG nodes. Long-form context that doesn't fit edge form, with on-demand retrieval, agent-write tooling gated by an approval modal, and a browsing surface. Design landed 2026-05-03 in `docs/design.md`.
+
+Phased like M4 — three phases, six stories tracked in `tasks/planned/`.
+
+### Phase 1 — manual notes baseline (planned)
+
+- [ ] `m5p1-notes-schema-editor` — `node_notes` table + GET/PUT API + markdown editor inside the existing node detail panel.
+- [ ] `m5p1-notes-panel` — top-level "Notes" surface in the empty-state dashboard (flat list of nodes with notes; click → opens detail panel).
+- [ ] `m5p1-notes-retrieval` — `notePreview` snippet alongside retrieved nodes + `mcp__kg__get_node_note` tool for full body.
+
+### Phase 2 — approval modal + agent edits (planned)
+
+- [ ] `m5p2-approval-modal` — SSE `approval_request` event + response endpoint + reusable Approve/Deny/Tweak modal infrastructure.
+- [ ] `m5p2-propose-note-edit` — first consumer: agent rewrites notes through the modal.
+
+### Phase 3 — node merge (planned)
+
+- [ ] `m5p3-propose-node-merge` — collapse N duplicate nodes into 1 (edges deduped, body unified, embeddings regenerated, provenance rewritten, source nodes dropped) in one transaction. Most complex tool; lands on its own.

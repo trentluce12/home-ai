@@ -12,6 +12,35 @@ A personal AI: streaming chat UI on top of the Anthropic API. Knowledge graph co
 
 Newest first. Append entries; don't edit history.
 
+### 2026-05-03 · M5 — node-attached notes layer
+
+M5 layers free-form markdown notes onto existing KG nodes alongside the structured edges. Notes carry the long-form context that doesn't fit edge form (a person's anecdote, a project's evolving readme, a topic's nuances) without abandoning the graph as the organizing spine.
+
+**Schema: 1:1 with nodes.** New `node_notes(node_id INTEGER PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE, body TEXT NOT NULL, updated_at TEXT NOT NULL)` table. One body per node — no orphan notes, no multi-note-per-node. `forget` cascades automatically. Notes don't get their own embeddings; they ride along when the parent node is retrieved.
+
+**Two write paths.** The user authors directly via a markdown editor inside the existing graph-modal node detail panel. The agent writes via `propose_note_edit(node_id, new_body)` — gated on user approval (see below). Asymmetry is intentional: facts land immediately (`record_user_fact`), but a paragraph rewrite is much harder to undo than a single edge `forget`, so notes warrant the gate.
+
+**Browsing surface.** A top-level "Notes" panel in the empty-state dashboard lists every node with a non-empty note (name + type + ~200-char preview). Click → opens the node detail panel. The graph modal keeps its existing role; the notes panel adds a flat reading view that doesn't require knowing which node a thought is attached to.
+
+**Retrieval: on-demand.** When `retrieveSubgraph` surfaces a node, it includes a `notePreview` field (first ~200 chars) in the formatted context block. Full body comes via a new `mcp__kg__get_node_note(id)` tool — opt-in so the agent only pulls bodies it actually needs, keeping the context block tight.
+
+**Approval modal as reusable infra.** Agent tools that mutate notes or merge nodes don't apply changes immediately; they emit an `approval_request` SSE event with `{requestId, kind, payload}` and block until the user responds via `POST /api/approval/:requestId`. The web client renders a modal with three options — **Approve** / **Deny** / **Tweak**. "Tweak" opens a textarea for free-form prose; the prose feeds back to the agent loop as the tool's return value (so the chain-of-thought continues from there). Pattern is reusable: future agent-proposes-X tools plug into the same SSE event + endpoint.
+
+**Agent tools.**
+
+- `propose_note_edit(node_id, new_body, reason)` — rewrites a note. User sees a diff before it lands.
+- `propose_node_merge(source_ids[], target: {name, type, body})` — collapses N nodes into 1. Most ambitious: edges combine (dedup by `(otherEndId, edgeType)`), body unifies, embeddings regenerate, provenance rewrites to target, source nodes drop. One transaction.
+
+**"Organize" = merge nodes, not merge notes.** With 1:1 schema there's nothing to organize at the note level. Organization happens at the node level: collapse `Person:John` + `Person:John_Doe` into one, unify their note bodies in the merge proposal. Cleaner mental model than parallel concepts of "merge nodes" and "merge notes."
+
+**Phased rollout (six stories, three phases).**
+
+- **Phase 1 — manual notes baseline:** `m5p1-notes-schema-editor` (table + node-detail editor), `m5p1-notes-panel` (dashboard browsing view), `m5p1-notes-retrieval` (snippet in retrieved-node payload + `get_node_note` tool).
+- **Phase 2 — approval modal + first agent tool:** `m5p2-approval-modal` (SSE + response endpoint + UI), `m5p2-propose-note-edit` (first consumer).
+- **Phase 3 — node merge:** `m5p3-propose-node-merge` (most complex tool; lands on its own).
+
+**Out of scope.** Standalone notes (no parent node), 1:N notes per node, agent-side embeddings for note bodies (retrieval rides on the parent node's embedding), versioning/history of notes (drop-and-replace; agent's `reason` lives in chat history), markdown rendering inside chat bubbles (already shipped in M4 phase 1).
+
 ### 2026-05-03 · Obsidian markdown import — runtime agent flow, not structured importer
 
 `m4p3-obsidian-import` ships as a **system-prompt extension** for the home-ai chat agent rather than a structured parser. Markdown is too varied across users (vault conventions, tag dialects, frontmatter discipline) to reliably extract facts via regex; the model has to do the judgement work. So the implementation is a runtime flow — when a user asks for an Obsidian import or types `/import-obsidian <path>` in chat, the home-ai agent walks the vault using its existing `Read` + `Glob` tools and records facts via `mcp__kg__record_user_fact`.
