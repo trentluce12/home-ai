@@ -26,7 +26,12 @@ const PROJECT_DIR = resolve(__dirname, "../..");
 config({ path: resolve(PROJECT_DIR, ".env") });
 
 const app = new Hono();
-app.use("*", cors({ origin: "http://localhost:5173" }));
+// In production the SPA is served from the same origin as the API (see
+// `m45-static-serving`), so CORS is unnecessary. In dev, Vite runs on
+// :5173 and the server on :3001, so we still need it.
+if (process.env.NODE_ENV !== "production") {
+  app.use("*", cors({ origin: "http://localhost:5173" }));
+}
 
 const SYSTEM_PROMPT = `You are home-ai — a personal AI for the user. You are warm, direct, and concise. Match the user's tone and length: terse questions get terse answers, open questions can get longer ones. Never preface with filler like "I'd be happy to help" or "Of course!". When you don't know something, say so.
 
@@ -74,7 +79,7 @@ function wrapWithContext(userText: string, contextBlock: string): string {
   return `<context>\n${contextBlock}\n</context>\n\n${userText}`;
 }
 
-app.post("/chat", async (c) => {
+app.post("/api/chat", async (c) => {
   const body = await c.req.json<ChatRequest>();
   const userText = body.message?.trim();
   if (!userText) {
@@ -331,7 +336,7 @@ function extractText(message: unknown): string {
     .join("");
 }
 
-app.get("/sessions", async (c) => {
+app.get("/api/sessions", async (c) => {
   const includeArchived = c.req.query("includeArchived") === "true";
   const sessions = await listSessions({
     dir: PROJECT_DIR,
@@ -357,7 +362,7 @@ app.get("/sessions", async (c) => {
   );
 });
 
-app.get("/sessions/:id/history", async (c) => {
+app.get("/api/sessions/:id/history", async (c) => {
   const id = c.req.param("id");
   const messages = await getSessionMessages(id, {
     dir: PROJECT_DIR,
@@ -376,13 +381,13 @@ app.get("/sessions/:id/history", async (c) => {
   return c.json(turns);
 });
 
-app.delete("/sessions/:id", async (c) => {
+app.delete("/api/sessions/:id", async (c) => {
   const id = c.req.param("id");
   await deleteSession(id, { dir: PROJECT_DIR, sessionStore: sqliteSessionStore });
   return c.json({ ok: true });
 });
 
-app.patch("/sessions/:id", async (c) => {
+app.patch("/api/sessions/:id", async (c) => {
   const id = c.req.param("id");
   const body = await c.req
     .json<{ title?: string }>()
@@ -400,19 +405,19 @@ app.patch("/sessions/:id", async (c) => {
 
 // ───────── KG (slash commands) ─────────
 
-app.get("/kg/recent", (c) => {
+app.get("/api/kg/recent", (c) => {
   const limit = Number(c.req.query("limit") ?? 20);
   return c.json(kg.recentNodes(Number.isFinite(limit) ? limit : 20));
 });
 
-app.get("/kg/recent-edges", (c) => {
+app.get("/api/kg/recent-edges", (c) => {
   const limit = Number(c.req.query("limit") ?? 8);
   return c.json(kg.recentEdges(Number.isFinite(limit) ? limit : 8));
 });
 
-app.get("/kg/stats", (c) => c.json(kg.kgStats()));
+app.get("/api/kg/stats", (c) => c.json(kg.kgStats()));
 
-app.get("/kg/by-name/:name", (c) => {
+app.get("/api/kg/by-name/:name", (c) => {
   const name = c.req.param("name");
   const nodes = kg.findNodesByName(name);
   const withNeighbors = nodes.map((node) => ({
@@ -422,7 +427,7 @@ app.get("/kg/by-name/:name", (c) => {
   return c.json(withNeighbors);
 });
 
-app.get("/kg/node/:id", (c) => {
+app.get("/api/kg/node/:id", (c) => {
   const id = c.req.param("id");
   const node = kg.getNode(id);
   if (!node) return c.json({ error: "Node not found" }, 404);
@@ -437,14 +442,14 @@ app.get("/kg/node/:id", (c) => {
   return c.json({ node, neighbors, provenance });
 });
 
-app.delete("/kg/node/:id", (c) => {
+app.delete("/api/kg/node/:id", (c) => {
   const id = c.req.param("id");
   const result = kg.deleteNode(id);
   if (!result.deleted) return c.json({ error: "Node not found" }, 404);
   return c.json(result);
 });
 
-app.get("/kg/graph", (c) => {
+app.get("/api/kg/graph", (c) => {
   const nodes = db.prepare(`SELECT id, name, type FROM nodes`).all() as {
     id: string;
     name: string;
@@ -456,7 +461,7 @@ app.get("/kg/graph", (c) => {
   return c.json({ nodes, edges });
 });
 
-app.post("/kg/record-fact", async (c) => {
+app.post("/api/kg/record-fact", async (c) => {
   const body = await c.req
     .json<{
       a: { name: string; type: string };
@@ -528,11 +533,11 @@ app.post("/kg/record-fact", async (c) => {
   });
 });
 
-app.get("/kg/layout", (c) => {
+app.get("/api/kg/layout", (c) => {
   return c.json(kg.getLayout());
 });
 
-app.post("/kg/layout", async (c) => {
+app.post("/api/kg/layout", async (c) => {
   const body = await c.req
     .json<{ positions: { nodeId: string; x: number; y: number }[] }>()
     .catch(() => null);
@@ -546,7 +551,7 @@ app.post("/kg/layout", async (c) => {
   return c.json({ ok: true, saved: valid.length });
 });
 
-app.get("/kg/export", (c) => {
+app.get("/api/kg/export", (c) => {
   const format = c.req.query("format") ?? "json";
   if (format === "dot") {
     return c.body(kg.exportKgDot(), 200, {

@@ -108,7 +108,7 @@ export default function App() {
     abortRef.current = controller;
 
     try {
-      const response = await fetch(`${SERVER_URL}/chat`, {
+      const response = await fetch(`${SERVER_URL}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: trimmed, sessionId }),

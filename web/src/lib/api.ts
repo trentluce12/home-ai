@@ -1,4 +1,7 @@
-export const SERVER_URL = "http://localhost:3001";
+// In dev, VITE_SERVER_URL points cross-port at the Hono server (`http://localhost:3001`).
+// In prod, the SPA is served from the same origin as the API (see `m45-static-serving`),
+// so an empty string makes all `${SERVER_URL}/api/...` calls relative.
+export const SERVER_URL = import.meta.env.VITE_SERVER_URL ?? "";
 
 export type Message = { role: "user" | "assistant"; content: string };
 
@@ -101,23 +104,24 @@ async function jsonFetch<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  listSessions: () => jsonFetch<SessionSummary[]>("/sessions"),
-  sessionHistory: (id: string) => jsonFetch<Message[]>(`/sessions/${id}/history`),
+  listSessions: () => jsonFetch<SessionSummary[]>("/api/sessions"),
+  sessionHistory: (id: string) => jsonFetch<Message[]>(`/api/sessions/${id}/history`),
   deleteSession: (id: string) =>
-    jsonFetch<{ ok: true }>(`/sessions/${id}`, { method: "DELETE" }),
+    jsonFetch<{ ok: true }>(`/api/sessions/${id}`, { method: "DELETE" }),
   renameSession: (id: string, title: string) =>
-    jsonFetch<{ ok: true; title: string }>(`/sessions/${id}`, {
+    jsonFetch<{ ok: true; title: string }>(`/api/sessions/${id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title }),
     }),
-  recentNodes: (limit = 20) => jsonFetch<KgNode[]>(`/kg/recent?limit=${limit}`),
-  recentEdges: (limit = 8) => jsonFetch<RecentEdge[]>(`/kg/recent-edges?limit=${limit}`),
-  stats: () => jsonFetch<KgStats>("/kg/stats"),
+  recentNodes: (limit = 20) => jsonFetch<KgNode[]>(`/api/kg/recent?limit=${limit}`),
+  recentEdges: (limit = 8) =>
+    jsonFetch<RecentEdge[]>(`/api/kg/recent-edges?limit=${limit}`),
+  stats: () => jsonFetch<KgStats>("/api/kg/stats"),
   byName: (name: string) =>
-    jsonFetch<NodeWithNeighbors[]>(`/kg/by-name/${encodeURIComponent(name)}`),
+    jsonFetch<NodeWithNeighbors[]>(`/api/kg/by-name/${encodeURIComponent(name)}`),
   deleteNode: (id: string) =>
-    jsonFetch<{ deleted: boolean; edgesRemoved: number }>(`/kg/node/${id}`, {
+    jsonFetch<{ deleted: boolean; edgesRemoved: number }>(`/api/kg/node/${id}`, {
       method: "DELETE",
     }),
   recordFact: (input: {
@@ -125,17 +129,17 @@ export const api = {
     b: { name: string; type: string };
     edgeType: string;
   }) =>
-    jsonFetch<{ ok: true; edge: KgEdge }>(`/kg/record-fact`, {
+    jsonFetch<{ ok: true; edge: KgEdge }>(`/api/kg/record-fact`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(input),
     }),
-  exportUrl: (format: "json" | "dot") => `${SERVER_URL}/kg/export?format=${format}`,
-  graph: () => jsonFetch<GraphData>("/kg/graph"),
-  nodeDetail: (id: string) => jsonFetch<NodeDetail>(`/kg/node/${id}`),
-  getLayout: () => jsonFetch<NodeLayoutEntry[]>("/kg/layout"),
+  exportUrl: (format: "json" | "dot") => `${SERVER_URL}/api/kg/export?format=${format}`,
+  graph: () => jsonFetch<GraphData>("/api/kg/graph"),
+  nodeDetail: (id: string) => jsonFetch<NodeDetail>(`/api/kg/node/${id}`),
+  getLayout: () => jsonFetch<NodeLayoutEntry[]>("/api/kg/layout"),
   saveLayout: (positions: NodeLayoutEntry[]) =>
-    jsonFetch<{ ok: true; saved: number }>(`/kg/layout`, {
+    jsonFetch<{ ok: true; saved: number }>(`/api/kg/layout`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ positions }),
