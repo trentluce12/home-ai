@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { ArrowUp, Network } from "lucide-react";
+import { ArrowDown, ArrowUp, Network, Square } from "lucide-react";
 import { MessageBubble } from "./components/MessageBubble";
 import { MemoryPanel } from "./components/MemoryPanel";
 import { SessionList } from "./components/SessionList";
 import { EmptyDashboard } from "./components/EmptyDashboard";
 import { GraphView } from "./components/GraphView";
 import { api, SERVER_URL, type Message, type MemoryEvent } from "./lib/api";
+
+const NEAR_BOTTOM_PX = 80;
 
 export default function App() {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -16,12 +18,43 @@ export default function App() {
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [graphOpen, setGraphOpen] = useState(false);
+  const [showJumpPill, setShowJumpPill] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const stickToBottomRef = useRef(true);
+
+  function isNearBottom(el: HTMLElement): boolean {
+    return el.scrollHeight - el.clientHeight - el.scrollTop <= NEAR_BOTTOM_PX;
+  }
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
+    const el = scrollRef.current;
+    if (!el) return;
+    if (stickToBottomRef.current) {
+      el.scrollTop = el.scrollHeight;
+      setShowJumpPill(false);
+    } else {
+      setShowJumpPill(true);
+    }
   }, [messages]);
+
+  function onScroll() {
+    const el = scrollRef.current;
+    if (!el) return;
+    const near = isNearBottom(el);
+    stickToBottomRef.current = near;
+    if (near) setShowJumpPill(false);
+  }
+
+  function jumpToLatest() {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    stickToBottomRef.current = true;
+    setShowJumpPill(false);
+  }
 
   useEffect(() => {
     const ta = textareaRef.current;
@@ -31,11 +64,14 @@ export default function App() {
   }, [input]);
 
   function handleNewChat() {
+    if (streaming) abortRef.current?.abort();
     setMessages([]);
     setMemoryEvents([]);
     setSessionId(null);
     setError(null);
     setInput("");
+    stickToBottomRef.current = true;
+    setShowJumpPill(false);
   }
 
   async function handleSelectSession(id: string) {
@@ -46,9 +82,15 @@ export default function App() {
       const history = await api.sessionHistory(id);
       setMessages(history);
       setSessionId(id);
+      stickToBottomRef.current = true;
+      setShowJumpPill(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  function stop() {
+    abortRef.current?.abort();
   }
 
   async function send() {
@@ -60,12 +102,17 @@ export default function App() {
     setMessages((curr) => [...curr, userMessage, { role: "assistant", content: "" }]);
     setInput("");
     setStreaming(true);
+    stickToBottomRef.current = true;
+
+    const controller = new AbortController();
+    abortRef.current = controller;
 
     try {
       const response = await fetch(`${SERVER_URL}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: trimmed, sessionId }),
+        signal: controller.signal,
       });
 
       if (!response.ok || !response.body) {
@@ -96,8 +143,13 @@ export default function App() {
         }
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unknown error");
+      if (controller.signal.aborted) {
+        // User-initiated stop — keep partial text, no error banner.
+      } else {
+        setError(err instanceof Error ? err.message : "Unknown error");
+      }
     } finally {
+      abortRef.current = null;
       setStreaming(false);
       setRefreshKey((k) => k + 1);
     }
@@ -127,6 +179,7 @@ export default function App() {
             nodeCount: (payload.nodeCount as number) ?? 0,
             edgeCount: (payload.edgeCount as number) ?? 0,
             rootNames: (payload.rootNames as string[]) ?? [],
+            formatted: (payload.formatted as string) ?? "",
           },
         ]);
         break;
@@ -141,6 +194,30 @@ export default function App() {
           },
         ]);
         break;
+      case "done": {
+        const usage =
+          (payload.usage as
+            | {
+                input_tokens?: number;
+                output_tokens?: number;
+                cache_read_input_tokens?: number;
+                cache_creation_input_tokens?: number;
+              }
+            | undefined) ?? {};
+        setMemoryEvents((curr) => [
+          ...curr,
+          {
+            kind: "done",
+            id: crypto.randomUUID(),
+            totalCostUsd: (payload.totalCostUsd as number | null) ?? null,
+            inputTokens: usage.input_tokens ?? 0,
+            outputTokens: usage.output_tokens ?? 0,
+            cacheReadTokens: usage.cache_read_input_tokens ?? 0,
+            cacheCreateTokens: usage.cache_creation_input_tokens ?? 0,
+          },
+        ]);
+        break;
+      }
       case "error":
         setError(payload.message as string);
         break;
@@ -187,7 +264,11 @@ export default function App() {
           refreshKey={refreshKey}
         />
 
-        <main className="flex-1 overflow-y-auto">
+        <main
+          ref={scrollRef}
+          onScroll={onScroll}
+          className="relative flex-1 overflow-y-auto"
+        >
           <div className="mx-auto flex h-full max-w-2xl flex-col px-6 py-10">
             {empty ? (
               <EmptyDashboard
@@ -208,6 +289,16 @@ export default function App() {
               </div>
             )}
           </div>
+          {showJumpPill && !empty && (
+            <button
+              onClick={jumpToLatest}
+              aria-label="jump to latest"
+              className="sticky bottom-4 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-zinc-800 bg-zinc-900/90 px-3 py-1.5 text-xs text-zinc-300 shadow-lg backdrop-blur transition hover:border-zinc-700 hover:bg-zinc-900"
+            >
+              <ArrowDown className="h-3 w-3" />
+              jump to latest
+            </button>
+          )}
         </main>
 
         <MemoryPanel events={memoryEvents} />
@@ -225,17 +316,30 @@ export default function App() {
               rows={1}
               className="flex-1 resize-none bg-transparent text-zinc-100 placeholder:text-zinc-600 focus:outline-none"
             />
-            <button
-              onClick={send}
-              disabled={streaming || !input.trim()}
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-zinc-100 text-zinc-900 transition hover:bg-white disabled:bg-zinc-800 disabled:text-zinc-600"
-              aria-label="send"
-            >
-              <ArrowUp className="h-4 w-4" strokeWidth={2.5} />
-            </button>
+            {streaming ? (
+              <button
+                onClick={stop}
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-zinc-100 text-zinc-900 transition hover:bg-white"
+                aria-label="stop"
+                title="Stop"
+              >
+                <Square className="h-3.5 w-3.5" strokeWidth={2.5} fill="currentColor" />
+              </button>
+            ) : (
+              <button
+                onClick={send}
+                disabled={!input.trim()}
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-zinc-100 text-zinc-900 transition hover:bg-white disabled:bg-zinc-800 disabled:text-zinc-600"
+                aria-label="send"
+              >
+                <ArrowUp className="h-4 w-4" strokeWidth={2.5} />
+              </button>
+            )}
           </div>
           <p className="mt-2 text-center text-xs text-zinc-600">
-            enter to send · shift + enter for newline
+            {streaming
+              ? "click stop to interrupt"
+              : "enter to send · shift + enter for newline"}
           </p>
         </div>
       </footer>

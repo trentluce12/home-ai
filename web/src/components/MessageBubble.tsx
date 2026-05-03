@@ -1,3 +1,5 @@
+import { useState } from "react";
+import { Check, Copy } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Message } from "../lib/api";
@@ -27,7 +29,7 @@ export function MessageBubble({ message }: { message: Message }) {
     );
   }
   return (
-    <div className="flex justify-start animate-fade-in">
+    <div className="group relative flex justify-start animate-fade-in">
       <div className={`max-w-[85%] text-zinc-200 ${PROSE_CLASSES}`}>
         {message.content ? (
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
@@ -35,6 +37,30 @@ export function MessageBubble({ message }: { message: Message }) {
           <span className="inline-block h-4 w-1.5 animate-pulse bg-zinc-500 align-middle" />
         )}
       </div>
+      {message.content && <CopyButton content={message.content} />}
     </div>
+  );
+}
+
+function CopyButton({ content }: { content: string }) {
+  const [copied, setCopied] = useState(false);
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch {
+      // clipboard may be blocked; ignore silently
+    }
+  }
+  return (
+    <button
+      onClick={copy}
+      aria-label={copied ? "copied" : "copy message"}
+      title={copied ? "copied" : "copy"}
+      className="absolute right-0 top-0 flex h-6 w-6 items-center justify-center rounded text-zinc-500 opacity-0 transition hover:bg-zinc-900 hover:text-zinc-200 group-hover:opacity-100 focus:opacity-100"
+    >
+      {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+    </button>
   );
 }

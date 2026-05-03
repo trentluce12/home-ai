@@ -9,7 +9,11 @@ body,
 }
 
 body {
-  font-family: "Geist", system-ui, -apple-system, sans-serif;
+  font-family:
+    "Geist",
+    system-ui,
+    -apple-system,
+    sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   background-color: #0a0a0a;
