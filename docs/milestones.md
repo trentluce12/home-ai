@@ -124,10 +124,10 @@ A layout + organization pass on top of M5. The left sidebar reorganizes into `Ag
 
 Phased — four phases, tasks tracked in `tasks/planned/`.
 
-### Phase 1 — layout reshuffle (planned)
+### Phase 1 — layout reshuffle (shipped ✓)
 
-- [ ] `m6p1-sidebar-sections` — restructure left sidebar with `Agents` + `Knowledge` collapsible sections; chats move under Agents; Notes / Knowledge Graph buttons under Knowledge; header `Network` icon retires.
-- [ ] `m6p1-memory-contextual` — demote memory panel to chat-only with slide-in + resizable drag handle + collapsible close button; persist collapsed state across sessions.
+- [x] `m6p1-sidebar-sections` — restructure left sidebar with `Agents` + `Knowledge` collapsible sections; chats move under Agents; Notes / Knowledge Graph buttons under Knowledge; header `Network` icon retires.
+- [x] `m6p1-memory-contextual` — demote memory panel to chat-only with slide-in + resizable drag handle + collapsible close button; persist collapsed state across sessions.
 
 ### Phase 2 — notes view + secondary sidebar (planned)
 
