@@ -89,6 +89,16 @@ export default [
     },
   },
 
+  // ── Harness hook scripts (.claude/scripts/*.mjs) — Node, no app code. ──
+  {
+    files: [".claude/scripts/**/*.mjs"],
+    languageOptions: {
+      globals: {
+        ...globals.node,
+      },
+    },
+  },
+
   // Project-wide tweaks. _-prefixed unused args/vars are intentional.
   {
     rules: {
