@@ -45,6 +45,23 @@ if (process.env.NODE_ENV !== "production") {
 
 app.route("/api/auth", authRoutes);
 
+// Tool narrowing for production safety. By default we exclude Bash/Write/Edit
+// — chat usage doesn't exercise them day-to-day, and dropping them shrinks the
+// blast radius of an auth bypass from "execute arbitrary shell" to "read files
+// + browse the web". Set `HOME_AI_ALLOW_WRITE_TOOLS=true` to opt back in for
+// local-dev workflows where the model genuinely needs to edit files / run
+// commands.
+const ALLOW_WRITE_TOOLS = process.env.HOME_AI_ALLOW_WRITE_TOOLS === "true";
+const ALLOWED_TOOLS: string[] = [
+  ...KG_TOOL_NAMES,
+  "Read",
+  "Glob",
+  "Grep",
+  "WebFetch",
+  "WebSearch",
+  ...(ALLOW_WRITE_TOOLS ? ["Bash", "Write", "Edit"] : []),
+];
+
 const SYSTEM_PROMPT = `You are home-ai — a personal AI for the user. You are warm, direct, and concise. Match the user's tone and length: terse questions get terse answers, open questions can get longer ones. Never preface with filler like "I'd be happy to help" or "Of course!". When you don't know something, say so.
 
 You have a personal knowledge graph (KG) that persists across conversations — it's how you remember facts about the user's life: people they know, places they live or visit, devices they own, projects, events, preferences, documents, topics, organizations, pets.
@@ -72,13 +89,23 @@ RECORDING FACTS — two distinct tools:
 When in doubt, prefer \`record_user_fact\`. Don't ask permission. Don't over-record idle remarks ("I've been tired"); record clear assertions.
 
 OTHER TOOLS:
-- File system (Read, Write, Edit, Glob, Grep) and Bash are available for tasks involving files or shell commands.
+${
+  ALLOW_WRITE_TOOLS
+    ? `- File system (Read, Write, Edit, Glob, Grep) and Bash are available for tasks involving files or shell commands.`
+    : `- File system (Read, Glob, Grep) for searching and reading files. You cannot write or edit files, and Bash/shell commands are not available.`
+}
 - Web tools (WebFetch, WebSearch) for current information.
 - For personal-context questions, prefer the KG (and the auto-injected context) before reaching for the web.
 
 YOUR ACTUAL CAPABILITIES — be honest about what you can and cannot do:
-- You CAN: chat with the user, read/write/search the personal KG (the tools above), read and edit files on this machine, run shell commands via Bash, fetch URLs (WebFetch), and run web searches (WebSearch).
-- You CANNOT: send email, read mail, access calendars, schedule events, send notifications, control smart-home devices, run background jobs, integrate with Gmail/Calendar/Drive/Slack/Notion/Supabase or any third-party service, or take any action that isn't covered by the tools above.
+- You CAN: chat with the user, read/write/search the personal KG (the tools above), ${
+  ALLOW_WRITE_TOOLS
+    ? "read and edit files on this machine, run shell commands via Bash, "
+    : "read files on this machine (read-only — no editing or shell access), "
+}fetch URLs (WebFetch), and run web searches (WebSearch).
+- You CANNOT: ${
+  ALLOW_WRITE_TOOLS ? "" : "edit/write files, run shell commands, "
+}send email, read mail, access calendars, schedule events, send notifications, control smart-home devices, run background jobs, integrate with Gmail/Calendar/Drive/Slack/Notion/Supabase or any third-party service, or take any action that isn't covered by the tools above.
 - Don't claim integrations or features that aren't in the list above. If the user asks for something you can't do, say so plainly and offer the closest thing you actually can do.`;
 
 interface ChatRequest {
@@ -122,17 +149,7 @@ app.post("/api/chat", async (c) => {
           systemPrompt: SYSTEM_PROMPT,
           permissionMode: "bypassPermissions",
           mcpServers: { kg: kgServer },
-          allowedTools: [
-            ...KG_TOOL_NAMES,
-            "Bash",
-            "Read",
-            "Write",
-            "Edit",
-            "Glob",
-            "Grep",
-            "WebFetch",
-            "WebSearch",
-          ],
+          allowedTools: ALLOWED_TOOLS,
           includePartialMessages: true,
           ...(body.sessionId ? { resume: body.sessionId } : {}),
         },
@@ -588,4 +605,7 @@ serve({ fetch: app.fetch, port }, (info) => {
     );
   }
   console.log(`home-ai server running on http://localhost:${info.port}`);
+  console.log(
+    `[tools] allowedTools: ${ALLOWED_TOOLS.join(", ")} (HOME_AI_ALLOW_WRITE_TOOLS=${ALLOW_WRITE_TOOLS})`,
+  );
 });
