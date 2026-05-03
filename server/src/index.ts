@@ -19,6 +19,7 @@ import { embedNodes } from "./embeddings/index.js";
 import { sqliteSessionStore } from "./sessions/store.js";
 import { cleanupSessions } from "./sessions/cleanup.js";
 import { db } from "./kg/db.js";
+import { authRoutes } from "./routes/auth.js";
 
 // Load .env from the project root (one level above server/)
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -30,8 +31,19 @@ const app = new Hono();
 // `m45-static-serving`), so CORS is unnecessary. In dev, Vite runs on
 // :5173 and the server on :3001, so we still need it.
 if (process.env.NODE_ENV !== "production") {
-  app.use("*", cors({ origin: "http://localhost:5173" }));
+  app.use(
+    "*",
+    cors({
+      origin: "http://localhost:5173",
+      // Browser must be allowed to send/receive the session cookie cross-origin
+      // in dev (vite :5173 → server :3001). In prod the SPA is served from the
+      // same origin, so no CORS at all.
+      credentials: true,
+    }),
+  );
 }
+
+app.route("/api/auth", authRoutes);
 
 const SYSTEM_PROMPT = `You are home-ai — a personal AI for the user. You are warm, direct, and concise. Match the user's tone and length: terse questions get terse answers, open questions can get longer ones. Never preface with filler like "I'd be happy to help" or "Of course!". When you don't know something, say so.
 
