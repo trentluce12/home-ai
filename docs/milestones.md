@@ -97,17 +97,17 @@ Smoke tests: JSON round-trip (default-merge skips known nodes, replace-all resee
 
 Smoke test: `docker compose up` on a clean machine, set env, hit URL, log in, send a chat, kill container, recreate, KG and sessions persist.
 
-## M5 — node-attached notes layer (planned)
+## M5 — node-attached notes layer
 
 Free-form markdown notes attached 1:1 to KG nodes. Long-form context that doesn't fit edge form, with on-demand retrieval, agent-write tooling gated by an approval modal, and a browsing surface. Design landed 2026-05-03 in `docs/design.md`.
 
 Phased like M4 — three phases, six stories tracked in `tasks/planned/`.
 
-### Phase 1 — manual notes baseline (planned)
+### Phase 1 — manual notes baseline (shipped ✓)
 
-- [ ] `m5p1-notes-schema-editor` — `node_notes` table + GET/PUT API + markdown editor inside the existing node detail panel.
-- [ ] `m5p1-notes-panel` — top-level "Notes" surface in the empty-state dashboard (flat list of nodes with notes; click → opens detail panel).
-- [ ] `m5p1-notes-retrieval` — `notePreview` snippet alongside retrieved nodes + `mcp__kg__get_node_note` tool for full body.
+- [x] `m5p1-notes-schema-editor` — `node_notes` table + GET/PUT API + markdown editor inside the existing node detail panel.
+- [x] `m5p1-notes-panel` — top-level "Notes" surface in the empty-state dashboard (flat list of nodes with notes; click → opens detail panel).
+- [x] `m5p1-notes-retrieval` — `notePreview` snippet alongside retrieved nodes + `mcp__kg__get_node_note` tool for full body.
 
 ### Phase 2 — approval modal + agent edits (planned)
 
