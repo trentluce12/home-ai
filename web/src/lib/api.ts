@@ -94,6 +94,12 @@ export interface NodeDetail {
   provenance: { source: string; sourceRef: string | null; createdAt: number }[];
 }
 
+export interface NodeNote {
+  nodeId: string;
+  body: string;
+  updatedAt: string;
+}
+
 // `credentials: "include"` is required so the browser sends/receives the
 // `home_ai_session` cookie cross-origin in dev (Vite :5173 → server :3001).
 // In prod the SPA is same-origin so it's a no-op there. Always set so callers
@@ -201,6 +207,18 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ positions }),
+    }),
+  getNote: (id: string) =>
+    jsonFetch<{ note: NodeNote | null }>(`/api/kg/node/${id}/note`),
+  setNote: (id: string, body: string) =>
+    jsonFetch<{ note: NodeNote | null }>(`/api/kg/node/${id}/note`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ body }),
+    }),
+  deleteNote: (id: string) =>
+    jsonFetch<{ deleted: boolean }>(`/api/kg/node/${id}/note`, {
+      method: "DELETE",
     }),
 };
 

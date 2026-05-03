@@ -5,7 +5,15 @@ import Sigma from "sigma";
 import FA2Layout from "graphology-layout-forceatlas2/worker";
 import forceAtlas2 from "graphology-layout-forceatlas2";
 import circular from "graphology-layout/circular";
-import { api, type GraphData, type NodeDetail, type NodeLayoutEntry } from "../lib/api";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import {
+  api,
+  type GraphData,
+  type NodeDetail,
+  type NodeLayoutEntry,
+  type NodeNote,
+} from "../lib/api";
 
 const TYPE_COLORS: Record<string, string> = {
   Person: "#a1a1aa",
@@ -429,6 +437,10 @@ function NodeDetailPanel({
       </header>
 
       <div className="flex-1 overflow-y-auto px-4 py-3">
+        <Section title="note">
+          <NoteEditor nodeId={detail.node.id} />
+        </Section>
+
         {propEntries.length > 0 && (
           <Section title="props">
             <ul className="flex flex-col gap-1">
@@ -496,5 +508,164 @@ function Section({ title, children }: { title: string; children: React.ReactNode
       <p className="mb-2 text-xs uppercase tracking-wider text-zinc-600">{title}</p>
       {children}
     </section>
+  );
+}
+
+const NOTE_PROSE = [
+  "prose prose-invert prose-xs max-w-none",
+  "prose-p:my-1.5 prose-p:leading-relaxed prose-p:text-xs",
+  "prose-ul:my-1.5 prose-ol:my-1.5 prose-li:my-0.5 prose-li:text-xs",
+  "prose-headings:text-zinc-100 prose-headings:font-medium",
+  "prose-strong:text-zinc-100",
+  "prose-em:text-zinc-200",
+  "prose-a:text-sky-400 prose-a:no-underline hover:prose-a:underline",
+  "prose-code:bg-zinc-900 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:text-zinc-200 prose-code:text-[0.8em] prose-code:font-mono prose-code:before:content-none prose-code:after:content-none",
+  "prose-pre:bg-zinc-900 prose-pre:border prose-pre:border-zinc-800 prose-pre:rounded prose-pre:my-2",
+  "prose-blockquote:border-l-zinc-700 prose-blockquote:text-zinc-400",
+  "prose-hr:border-zinc-800",
+].join(" ");
+
+/**
+ * Markdown note attached 1:1 to a node. Save-on-blur — the editor flushes to
+ * the server when focus leaves the textarea (or the panel unmounts mid-edit).
+ * An empty-after-trim body is treated as a delete by the server, so an unused
+ * editor doesn't leave empty rows behind.
+ */
+function NoteEditor({ nodeId }: { nodeId: string }) {
+  const [note, setNote] = useState<NodeNote | null>(null);
+  const [draft, setDraft] = useState("");
+  // Track the body the server last confirmed so blur can be a no-op when
+  // nothing changed (avoid an unnecessary PUT round-trip on every focus loss).
+  const savedRef = useRef("");
+  const [tab, setTab] = useState<"edit" | "preview">("edit");
+  const [status, setStatus] = useState<"idle" | "loading" | "saving" | "error">(
+    "loading",
+  );
+  const [error, setError] = useState<string | null>(null);
+
+  // Fetch the note for this node. Re-runs when nodeId changes (panel re-uses
+  // the same NoteEditor instance when the user clicks a different node).
+  useEffect(() => {
+    let cancelled = false;
+    setStatus("loading");
+    setError(null);
+    api
+      .getNote(nodeId)
+      .then((res) => {
+        if (cancelled) return;
+        const body = res.note?.body ?? "";
+        setNote(res.note);
+        setDraft(body);
+        savedRef.current = body;
+        setStatus("idle");
+        setTab("edit");
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : String(err));
+        setStatus("error");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [nodeId]);
+
+  // Flush any pending changes when the editor unmounts mid-edit (panel close,
+  // node switch, modal close). Keep this ref-driven so we don't need to wire
+  // through extra deps.
+  const flushRef = useRef<() => Promise<void>>(async () => undefined);
+  flushRef.current = async () => {
+    if (draft === savedRef.current) return;
+    try {
+      const res = await api.setNote(nodeId, draft);
+      setNote(res.note);
+      savedRef.current = draft.trim().length === 0 ? "" : draft;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setStatus("error");
+    }
+  };
+  useEffect(() => {
+    return () => {
+      // fire-and-forget; we can't await in cleanup
+      void flushRef.current();
+    };
+  }, []);
+
+  async function handleBlur() {
+    if (draft === savedRef.current) return;
+    setStatus("saving");
+    try {
+      const res = await api.setNote(nodeId, draft);
+      setNote(res.note);
+      savedRef.current = draft.trim().length === 0 ? "" : draft;
+      setStatus("idle");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setStatus("error");
+    }
+  }
+
+  if (status === "loading") {
+    return <p className="text-xs text-zinc-600">loading…</p>;
+  }
+  if (status === "error" && error) {
+    return <p className="text-xs text-red-400">note error: {error}</p>;
+  }
+
+  const isEmpty = draft.trim().length === 0;
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center gap-1 text-[10px] font-mono uppercase tracking-wider">
+        <button
+          type="button"
+          onClick={() => setTab("edit")}
+          className={`rounded px-2 py-0.5 transition ${
+            tab === "edit"
+              ? "bg-zinc-800 text-zinc-100"
+              : "text-zinc-500 hover:text-zinc-300"
+          }`}
+        >
+          edit
+        </button>
+        <button
+          type="button"
+          onClick={() => setTab("preview")}
+          className={`rounded px-2 py-0.5 transition ${
+            tab === "preview"
+              ? "bg-zinc-800 text-zinc-100"
+              : "text-zinc-500 hover:text-zinc-300"
+          }`}
+        >
+          preview
+        </button>
+        <span className="ml-auto text-zinc-600">
+          {status === "saving" ? "saving…" : note ? "saved" : isEmpty ? "" : "unsaved"}
+        </span>
+      </div>
+
+      {tab === "edit" ? (
+        <>
+          <textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onBlur={handleBlur}
+            placeholder="no notes yet — start typing markdown."
+            className="min-h-[10rem] w-full resize-y rounded-md border border-zinc-800 bg-zinc-900/60 px-3 py-2 font-mono text-xs text-zinc-100 placeholder:text-zinc-600 focus:border-zinc-700 focus:bg-zinc-900 focus:outline-none"
+            spellCheck={false}
+          />
+          <p className="text-[10px] text-zinc-600">saves on blur. supports markdown.</p>
+        </>
+      ) : isEmpty ? (
+        <p className="text-xs text-zinc-600">no notes yet.</p>
+      ) : (
+        <div
+          className={`rounded-md border border-zinc-800 bg-zinc-900/30 px-3 py-2 ${NOTE_PROSE}`}
+        >
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{draft}</ReactMarkdown>
+        </div>
+      )}
+    </div>
   );
 }

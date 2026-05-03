@@ -497,6 +497,43 @@ app.delete("/api/kg/node/:id", (c) => {
   return c.json(result);
 });
 
+// ───────── Node notes (M5 phase 1) ─────────
+//
+// 1:1 free-form markdown attached to a KG node. `node_notes` cascades on node
+// delete so `forget` cleans up automatically (no app-level cleanup needed).
+// PUT body is empty → treat as delete; the editor uses save-on-blur and an
+// empty body shouldn't leave an empty row behind.
+
+app.get("/api/kg/node/:id/note", (c) => {
+  const id = c.req.param("id");
+  if (!kg.getNode(id)) return c.json({ error: "Node not found" }, 404);
+  const note = kg.getNote(id);
+  return c.json({ note });
+});
+
+app.put("/api/kg/node/:id/note", async (c) => {
+  const id = c.req.param("id");
+  if (!kg.getNode(id)) return c.json({ error: "Node not found" }, 404);
+  const body = await c.req.json<{ body?: unknown }>().catch(() => null);
+  if (!body || typeof body.body !== "string") {
+    return c.json({ error: "body (string) required" }, 400);
+  }
+  const trimmed = body.body.trim();
+  if (trimmed.length === 0) {
+    kg.deleteNote(id);
+    return c.json({ note: null });
+  }
+  const note = kg.setNote(id, body.body);
+  return c.json({ note });
+});
+
+app.delete("/api/kg/node/:id/note", (c) => {
+  const id = c.req.param("id");
+  if (!kg.getNode(id)) return c.json({ error: "Node not found" }, 404);
+  const result = kg.deleteNote(id);
+  return c.json(result);
+});
+
 app.get("/api/kg/graph", (c) => {
   const nodes = db.prepare(`SELECT id, name, type FROM nodes`).all() as {
     id: string;

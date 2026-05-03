@@ -120,6 +120,16 @@ CREATE TABLE IF NOT EXISTS node_layout (
   updated_at INTEGER NOT NULL
 );
 
+-- M5 phase 1: free-form markdown body attached 1:1 to a node. Cascades on
+-- forget so notes never orphan. updated_at is an ISO-8601 string (per the
+-- M5 design); the rest of the schema uses INTEGER ms-since-epoch -- one-off
+-- inconsistency intentional to match the M5 spec.
+CREATE TABLE IF NOT EXISTS node_notes (
+  node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+  body TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 -- M4.5 auth: server-side session tokens (DB-backed cookies).
 -- Token is a 32-byte URL-safe random (base64url). Sliding 30-day idle expiry —
 -- expires_at is bumped alongside last_seen_at on each authed request.
@@ -744,6 +754,35 @@ export function saveLayout(positions: NodeLayoutRow[]): void {
     }
   });
   tx();
+}
+
+export interface NodeNote {
+  nodeId: string;
+  body: string;
+  updatedAt: string;
+}
+
+export function getNote(nodeId: string): NodeNote | null {
+  const row = db
+    .prepare(`SELECT node_id, body, updated_at FROM node_notes WHERE node_id = ?`)
+    .get(nodeId) as { node_id: string; body: string; updated_at: string } | undefined;
+  return row ? { nodeId: row.node_id, body: row.body, updatedAt: row.updated_at } : null;
+}
+
+export function setNote(nodeId: string, body: string): NodeNote {
+  const updatedAt = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO node_notes (node_id, body, updated_at) VALUES (?, ?, ?)
+     ON CONFLICT(node_id) DO UPDATE SET
+       body = excluded.body,
+       updated_at = excluded.updated_at`,
+  ).run(nodeId, body, updatedAt);
+  return { nodeId, body, updatedAt };
+}
+
+export function deleteNote(nodeId: string): { deleted: boolean } {
+  const info = db.prepare(`DELETE FROM node_notes WHERE node_id = ?`).run(nodeId);
+  return { deleted: info.changes > 0 };
 }
 
 export function recordProvenance(input: {
