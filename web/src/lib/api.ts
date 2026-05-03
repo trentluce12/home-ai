@@ -101,6 +101,20 @@ export interface NodeNote {
 }
 
 /**
+ * One row in the dashboard `Notes` panel — every node with a non-empty note,
+ * ordered by note recency. `preview` is whitespace-collapsed and truncated
+ * to ~200 chars (with a trailing ellipsis only when the body actually exceeded
+ * the limit). `updatedAt` is the ISO-8601 string from `node_notes.updated_at`.
+ */
+export interface KgNoteListEntry {
+  nodeId: string;
+  name: string;
+  type: string;
+  preview: string;
+  updatedAt: string;
+}
+
+/**
  * Mirrors the server's `ApprovalDecision` union (server/src/approval.ts).
  * Kept as a duplicated definition rather than a shared types package — the
  * project doesn't have a cross-workspace types layer and this surface is small.
@@ -225,6 +239,7 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ positions }),
     }),
+  notes: () => jsonFetch<KgNoteListEntry[]>("/api/kg/notes"),
   getNote: (id: string) =>
     jsonFetch<{ note: NodeNote | null }>(`/api/kg/node/${id}/note`),
   setNote: (id: string, body: string) =>

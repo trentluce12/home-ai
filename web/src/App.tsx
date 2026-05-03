@@ -60,6 +60,10 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [graphOpen, setGraphOpen] = useState(false);
+  // When the dashboard "notes" panel opens the graph, it passes the node ID
+  // so GraphView can focus + populate its detail panel automatically. Reset
+  // to null on close so a subsequent toolbar-button open doesn't re-focus.
+  const [graphFocusNodeId, setGraphFocusNodeId] = useState<string | null>(null);
   const [showJumpPill, setShowJumpPill] = useState(false);
   const [approvalRequest, setApprovalRequest] = useState<ApprovalRequest | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -350,6 +354,10 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
               <EmptyDashboard
                 refreshKey={refreshKey}
                 onChange={() => setRefreshKey((k) => k + 1)}
+                onOpenNode={(id) => {
+                  setGraphFocusNodeId(id);
+                  setGraphOpen(true);
+                }}
               />
             ) : (
               <div className="flex flex-col gap-6">
@@ -422,8 +430,12 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
 
       <GraphView
         open={graphOpen}
-        onClose={() => setGraphOpen(false)}
+        onClose={() => {
+          setGraphOpen(false);
+          setGraphFocusNodeId(null);
+        }}
         refreshKey={refreshKey}
+        initialNodeId={graphFocusNodeId}
       />
 
       {approvalRequest && (

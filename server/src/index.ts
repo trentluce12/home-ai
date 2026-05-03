@@ -593,6 +593,44 @@ app.delete("/api/kg/node/:id/note", (c) => {
   return c.json(result);
 });
 
+// Flat listing of every node with a non-empty note. Powers the dashboard
+// "notes" panel (M5 phase 1 — `m5p1-notes-panel`). Ordered by note recency
+// so freshly-written notes float to the top. Preview matches the retrieval
+// snippet: whitespace-collapsed, ~200 chars, ellipsis only when truncated.
+const NOTES_PREVIEW_CHARS = 200;
+app.get("/api/kg/notes", (c) => {
+  const rows = db
+    .prepare(
+      `SELECT n.id as nodeId, n.name as name, n.type as type,
+              nn.body as body, nn.updated_at as updatedAt
+         FROM node_notes nn
+         JOIN nodes n ON n.id = nn.node_id
+        ORDER BY nn.updated_at DESC`,
+    )
+    .all() as {
+    nodeId: string;
+    name: string;
+    type: string;
+    body: string;
+    updatedAt: string;
+  }[];
+  const entries = rows.map((r) => {
+    const collapsed = r.body.replace(/\s+/g, " ").trim();
+    const preview =
+      collapsed.length <= NOTES_PREVIEW_CHARS
+        ? collapsed
+        : collapsed.slice(0, NOTES_PREVIEW_CHARS).trimEnd() + "…";
+    return {
+      nodeId: r.nodeId,
+      name: r.name,
+      type: r.type,
+      preview,
+      updatedAt: r.updatedAt,
+    };
+  });
+  return c.json(entries);
+});
+
 app.get("/api/kg/graph", (c) => {
   const nodes = db.prepare(`SELECT id, name, type FROM nodes`).all() as {
     id: string;

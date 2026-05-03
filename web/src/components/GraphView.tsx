@@ -38,9 +38,16 @@ interface Props {
   open: boolean;
   onClose: () => void;
   refreshKey: number;
+  /**
+   * Node ID to focus + open the detail panel for once the graph is loaded.
+   * Set when entering the modal from the dashboard "notes" panel; null when
+   * opened via the toolbar button. Applied once-per-open by a dedicated
+   * effect so a stale focus request doesn't re-fire on every layout tick.
+   */
+  initialNodeId?: string | null;
 }
 
-export function GraphView({ open, onClose, refreshKey }: Props) {
+export function GraphView({ open, onClose, refreshKey, initialNodeId }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const sigmaRef = useRef<Sigma | null>(null);
   const layoutRef = useRef<FA2Layout | null>(null);
@@ -235,6 +242,27 @@ export function GraphView({ open, onClose, refreshKey }: Props) {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
+
+  // Apply `initialNodeId` once the graph is built. Triggered when the
+  // dashboard's "notes" panel opens the modal pre-scoped to a node — we focus
+  // the camera and populate the detail panel without a manual click. Re-runs
+  // if `initialNodeId` changes mid-open (rare; e.g. opening, closing without
+  // resetting, then opening again with a different node) but the parent
+  // resets it on close so this is effectively once-per-open.
+  useEffect(() => {
+    if (!open || !data || !initialNodeId) return;
+    const sigma = sigmaRef.current;
+    const graph = graphRef.current;
+    if (!sigma || !graph || !graph.hasNode(initialNodeId)) return;
+    const x = graph.getNodeAttribute(initialNodeId, "x") as number | undefined;
+    const y = graph.getNodeAttribute(initialNodeId, "y") as number | undefined;
+    if (typeof x !== "number" || typeof y !== "number") return;
+    sigma.getCamera().animate({ x, y, ratio: 0.3 }, { duration: 400 });
+    api
+      .nodeDetail(initialNodeId)
+      .then(setSelectedDetail)
+      .catch(() => undefined);
+  }, [open, data, layout, hidden, initialNodeId]);
 
   const presentTypes = useMemo(() => {
     if (!data) return [];

@@ -5,6 +5,7 @@ import {
   EDGE_TYPES,
   NODE_TYPES,
   type KgNode,
+  type KgNoteListEntry,
   type KgStats,
   type NodeWithNeighbors,
   type RecentEdge,
@@ -13,13 +14,15 @@ import {
 interface Props {
   refreshKey: number;
   onChange: () => void;
+  onOpenNode: (nodeId: string) => void;
 }
 
-export function EmptyDashboard({ refreshKey, onChange }: Props) {
+export function EmptyDashboard({ refreshKey, onChange, onOpenNode }: Props) {
   return (
     <div className="mx-auto flex w-full max-w-xl flex-col gap-10 animate-fade-in">
       <Hero />
       <StatsAndRecent refreshKey={refreshKey} />
+      <NotesPanel refreshKey={refreshKey} onOpenNode={onOpenNode} />
       <AddFactForm onChange={onChange} />
       <ForgetForm onChange={onChange} />
       <ExportRow />
@@ -145,6 +148,76 @@ function StatsAndRecent({ refreshKey }: { refreshKey: number }) {
             ))}
           </ul>
         </div>
+      )}
+    </section>
+  );
+}
+
+function NotesPanel({
+  refreshKey,
+  onOpenNode,
+}: {
+  refreshKey: number;
+  onOpenNode: (nodeId: string) => void;
+}) {
+  const [notes, setNotes] = useState<KgNoteListEntry[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setError(null);
+    api
+      .notes()
+      .then((res) => {
+        if (!cancelled) setNotes(res);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshKey]);
+
+  if (error) {
+    return (
+      <section>
+        <SectionLabel>notes</SectionLabel>
+        <p className="text-sm text-red-400">{error}</p>
+      </section>
+    );
+  }
+  if (!notes) return null;
+
+  return (
+    <section>
+      <SectionLabel>notes</SectionLabel>
+      {notes.length === 0 ? (
+        <p className="rounded-lg border border-zinc-900 bg-zinc-900/30 px-4 py-3 text-sm text-zinc-500">
+          No notes yet — open a node in the graph and add one.
+        </p>
+      ) : (
+        <ul className="flex flex-col gap-1.5">
+          {notes.map((n) => (
+            <li key={n.nodeId}>
+              <button
+                onClick={() => onOpenNode(n.nodeId)}
+                className="flex w-full flex-col gap-1 rounded-md border border-zinc-900 bg-zinc-900/30 px-3 py-2 text-left transition hover:border-zinc-700 hover:bg-zinc-900/60"
+              >
+                <div className="flex items-baseline justify-between gap-2">
+                  <div className="min-w-0 truncate">
+                    <span className="text-sm text-zinc-200">{n.name}</span>
+                    <span className="ml-2 text-xs text-zinc-500">{n.type}</span>
+                  </div>
+                  <span className="font-mono text-[10px] text-zinc-600">
+                    {timeAgo(Date.parse(n.updatedAt))}
+                  </span>
+                </div>
+                <p className="line-clamp-2 text-xs text-zinc-500">{n.preview}</p>
+              </button>
+            </li>
+          ))}
+        </ul>
       )}
     </section>
   );
