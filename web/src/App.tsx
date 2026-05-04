@@ -88,13 +88,18 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [graphOpen, setGraphOpen] = useState(false);
+  // M6 phase 4: `graphView` is the main panel's "Knowledge Graph" mode. When
+  // true, the inline `GraphView` fills the main panel (no chat input footer,
+  // no memory panel, no overlay). Mutually exclusive with `notesOpen` — the
+  // sidebar's `Notes` and `Knowledge Graph` buttons each own one of these
+  // boolean lanes, and selecting one tears down the other.
+  const [graphView, setGraphView] = useState(false);
   const [memoryPanelClosed, setMemoryPanelClosed] = useState<boolean>(() =>
     loadMemoryPanelClosed(),
   );
   // When the dashboard "notes" panel opens the graph, it passes the node ID
   // so GraphView can focus + populate its detail panel automatically. Reset
-  // to null on close so a subsequent toolbar-button open doesn't re-focus.
+  // to null when leaving the graph so a subsequent open doesn't re-focus.
   const [graphFocusNodeId, setGraphFocusNodeId] = useState<string | null>(null);
   // Notes view state. `notesOpen` toggles the secondary sidebar + notes-context
   // main-panel. `selectedNote` holds the row info for the currently-selected
@@ -105,11 +110,23 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
   const [selectedNote, setSelectedNote] = useState<{
     nodeId: string;
     name: string;
-    // `initialMode` is set to "split" only by the inline-create flow, so the
-    // freshly-minted note opens with the editor focused and the user can type
-    // the body immediately. Normal row-clicks omit it (the field stays absent),
-    // which `NotesView` interprets as the default `preview`.
+    // `initialMode` is set to "split" by the inline-create flow and the
+    // graph's `Edit note` button (M6 phase 4), so the user lands in the
+    // editor with the textarea focused. Normal row-clicks omit it (the
+    // field stays absent), which `NotesView` interprets as the default
+    // `preview`.
     initialMode?: "preview" | "split";
+  } | null>(null);
+  // M6 phase 4: `expandToNote` is an external command for `NotesSidebar` to
+  // walk up a note's folder ancestor chain and add every folder on the path
+  // to its `expanded` set. Wired by the graph's `Edit note` flow so the
+  // freshly-selected note is visible in the tree on arrival. The `token`
+  // increments on every dispatch so re-clicking `Edit note` on the same
+  // note re-fires the expansion (the sidebar's effect keys on token, not
+  // nodeId, so identical-id dispatches don't get deduped).
+  const [expandToNote, setExpandToNote] = useState<{
+    nodeId: string;
+    token: number;
   } | null>(null);
   const [showJumpPill, setShowJumpPill] = useState(false);
   const [approvalRequest, setApprovalRequest] = useState<ApprovalRequest | null>(null);
@@ -165,10 +182,13 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
     setError(null);
     setInput("");
     setApprovalRequest(null);
-    // Tear down the notes view if it was open — opening (or new-chatting)
-    // returns the user to the chat surface.
+    // Tear down the notes / graph views if either was open — opening (or
+    // new-chatting) returns the user to the chat surface.
     setNotesOpen(false);
     setSelectedNote(null);
+    setExpandToNote(null);
+    setGraphView(false);
+    setGraphFocusNodeId(null);
     stickToBottomRef.current = true;
     setShowJumpPill(false);
   }
@@ -181,10 +201,13 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
       const history = await api.sessionHistory(id);
       setMessages(history);
       setSessionId(id);
-      // Selecting a chat tears down the notes view (memory panel re-opens
-      // contextually as part of the active-chat layout).
+      // Selecting a chat tears down the notes / graph views (memory panel
+      // re-opens contextually as part of the active-chat layout).
       setNotesOpen(false);
       setSelectedNote(null);
+      setExpandToNote(null);
+      setGraphView(false);
+      setGraphFocusNodeId(null);
       stickToBottomRef.current = true;
       setShowJumpPill(false);
     } catch (err) {
@@ -197,12 +220,47 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
       if (curr) {
         // Closing — also clear the selected note so re-opening lands on
         // the notes-context dashboard (consistent with re-clicking `Notes`
-        // = "back to the notes home").
+        // = "back to the notes home"), and clear any pending
+        // expand-to-note command so a re-open doesn't replay a stale
+        // expansion from the last graph → Edit-note hop.
         setSelectedNote(null);
+        setExpandToNote(null);
         return false;
       }
+      // Opening Notes tears down the graph view if it was up; the two
+      // surfaces are mutually exclusive.
+      setGraphView(false);
+      setGraphFocusNodeId(null);
       return true;
     });
+  }
+
+  // Open the inline graph view (M6 phase 4). Optionally accepts a node id
+  // to focus on arrival — passed by the dashboard's `Notes` panel; null
+  // when the user clicks `Knowledge Graph` in the sidebar. Tears down the
+  // notes view since the two main-panel surfaces are mutually exclusive.
+  function handleOpenGraph(focusNodeId: string | null = null) {
+    setNotesOpen(false);
+    setSelectedNote(null);
+    setExpandToNote(null);
+    setGraphFocusNodeId(focusNodeId);
+    setGraphView(true);
+  }
+
+  // M6 phase 4: invoked by the graph's per-node `Edit note` button. The
+  // user clicks the button in the detail panel; we tear down the graph,
+  // open the notes view in split-edit mode for the matching note, and
+  // dispatch an `expandToNote` command so the secondary sidebar walks up
+  // the note's folder ancestor chain. `name` is the underlying node's
+  // display label, used as a flash-free title bridge — `NotesView`'s
+  // GET overrides it with the canonical `node_notes.name` once the
+  // round-trip resolves.
+  function handleEditNote(nodeId: string, name: string) {
+    setGraphView(false);
+    setGraphFocusNodeId(null);
+    setNotesOpen(true);
+    setSelectedNote({ nodeId, name, initialMode: "split" });
+    setExpandToNote((prev) => ({ nodeId, token: (prev?.token ?? 0) + 1 }));
   }
 
   function handleSelectNote(nodeId: string, name: string) {
@@ -442,7 +500,7 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
           onSelectSession={handleSelectSession}
           onNewChat={handleNewChat}
           refreshKey={refreshKey}
-          onOpenGraph={() => setGraphOpen(true)}
+          onOpenGraph={() => handleOpenGraph(null)}
           onOpenNotes={handleToggleNotes}
         />
 
@@ -455,82 +513,92 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
             onNoteDeleted={handleNoteDeleted}
             onClose={handleToggleNotes}
             refreshKey={refreshKey}
+            expandToNote={expandToNote}
           />
         )}
 
-        <main
-          ref={scrollRef}
-          onScroll={onScroll}
-          className="relative flex-1 overflow-y-auto"
-        >
-          {notesOpen ? (
-            selectedNote ? (
-              <NotesView
-                key={selectedNote.nodeId}
-                nodeId={selectedNote.nodeId}
-                title={selectedNote.name}
-                initialMode={selectedNote.initialMode}
-                onChange={() => setRefreshKey((k) => k + 1)}
-              />
-            ) : (
-              <div className="mx-auto flex h-full max-w-2xl flex-col px-6 py-10">
-                <EmptyDashboard
-                  variant="notes"
-                  refreshKey={refreshKey}
+        {graphView ? (
+          // M6 phase 4: inline `GraphView` as the main panel — no overlay,
+          // no chat input, no memory panel. `key` on `refreshKey` forces a
+          // teardown + remount when the underlying data may have changed
+          // (chat finished, fact recorded). `GraphView`'s own cleanup runs
+          // on unmount so leaving the view kills its Sigma worker cleanly.
+          <main className="relative flex-1 overflow-hidden">
+            <GraphView
+              refreshKey={refreshKey}
+              initialNodeId={graphFocusNodeId}
+              onEditNote={handleEditNote}
+            />
+          </main>
+        ) : (
+          <main
+            ref={scrollRef}
+            onScroll={onScroll}
+            className="relative flex-1 overflow-y-auto"
+          >
+            {notesOpen ? (
+              selectedNote ? (
+                <NotesView
+                  key={selectedNote.nodeId}
+                  nodeId={selectedNote.nodeId}
+                  title={selectedNote.name}
+                  initialMode={selectedNote.initialMode}
                   onChange={() => setRefreshKey((k) => k + 1)}
-                  onOpenNode={(id) => {
-                    setGraphFocusNodeId(id);
-                    setGraphOpen(true);
-                  }}
-                />
-              </div>
-            )
-          ) : (
-            <div className="mx-auto flex h-full max-w-2xl flex-col px-6 py-10">
-              {empty ? (
-                <EmptyDashboard
-                  refreshKey={refreshKey}
-                  onChange={() => setRefreshKey((k) => k + 1)}
-                  onOpenNode={(id) => {
-                    setGraphFocusNodeId(id);
-                    setGraphOpen(true);
-                  }}
                 />
               ) : (
-                <div className="flex flex-col gap-6">
-                  {messages.map((m, i) => (
-                    <MessageBubble key={i} message={m} />
-                  ))}
-                  {error && (
-                    <div className="rounded-lg border border-red-900/60 bg-red-950/30 px-4 py-2.5 text-sm text-red-300 animate-fade-in">
-                      {error}
-                    </div>
-                  )}
-                  <div ref={bottomRef} />
+                <div className="mx-auto flex h-full max-w-2xl flex-col px-6 py-10">
+                  <EmptyDashboard
+                    variant="notes"
+                    refreshKey={refreshKey}
+                    onChange={() => setRefreshKey((k) => k + 1)}
+                    onOpenNode={(id) => handleOpenGraph(id)}
+                  />
                 </div>
-              )}
-            </div>
-          )}
-          {showJumpPill && !empty && !notesOpen && (
-            <button
-              onClick={jumpToLatest}
-              aria-label="jump to latest"
-              className="sticky bottom-4 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-zinc-800 bg-zinc-900/90 px-3 py-1.5 text-xs text-zinc-300 shadow-lg backdrop-blur transition hover:border-zinc-700 hover:bg-zinc-900"
-            >
-              <ArrowDown className="h-3 w-3" />
-              jump to latest
-            </button>
-          )}
-        </main>
+              )
+            ) : (
+              <div className="mx-auto flex h-full max-w-2xl flex-col px-6 py-10">
+                {empty ? (
+                  <EmptyDashboard
+                    refreshKey={refreshKey}
+                    onChange={() => setRefreshKey((k) => k + 1)}
+                    onOpenNode={(id) => handleOpenGraph(id)}
+                  />
+                ) : (
+                  <div className="flex flex-col gap-6">
+                    {messages.map((m, i) => (
+                      <MessageBubble key={i} message={m} />
+                    ))}
+                    {error && (
+                      <div className="rounded-lg border border-red-900/60 bg-red-950/30 px-4 py-2.5 text-sm text-red-300 animate-fade-in">
+                        {error}
+                      </div>
+                    )}
+                    <div ref={bottomRef} />
+                  </div>
+                )}
+              </div>
+            )}
+            {showJumpPill && !empty && !notesOpen && (
+              <button
+                onClick={jumpToLatest}
+                aria-label="jump to latest"
+                className="sticky bottom-4 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-zinc-800 bg-zinc-900/90 px-3 py-1.5 text-xs text-zinc-300 shadow-lg backdrop-blur transition hover:border-zinc-700 hover:bg-zinc-900"
+              >
+                <ArrowDown className="h-3 w-3" />
+                jump to latest
+              </button>
+            )}
+          </main>
+        )}
 
         <MemoryPanel
           events={memoryEvents}
-          visible={!empty && !memoryPanelClosed && !notesOpen}
+          visible={!empty && !memoryPanelClosed && !notesOpen && !graphView}
           onClose={handleCloseMemoryPanel}
         />
       </div>
 
-      {!notesOpen && (
+      {!notesOpen && !graphView && (
         <footer className="shrink-0 border-t border-zinc-900/80 px-6 py-4">
           <div className="mx-auto max-w-2xl">
             <div className="relative flex items-end gap-2 rounded-2xl border border-zinc-800 bg-zinc-900/60 px-4 py-3 backdrop-blur transition-colors focus-within:border-zinc-700 focus-within:bg-zinc-900">
@@ -571,16 +639,6 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
           </div>
         </footer>
       )}
-
-      <GraphView
-        open={graphOpen}
-        onClose={() => {
-          setGraphOpen(false);
-          setGraphFocusNodeId(null);
-        }}
-        refreshKey={refreshKey}
-        initialNodeId={graphFocusNodeId}
-      />
 
       {approvalRequest && (
         <ApprovalModal

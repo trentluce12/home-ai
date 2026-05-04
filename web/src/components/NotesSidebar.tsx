@@ -50,6 +50,18 @@ interface Props {
    * on every change so the sidebar stays in sync.
    */
   refreshKey: number;
+  /**
+   * External "expand-to-this-note" command (M6 phase 4). When set, the
+   * sidebar walks up the note's folder ancestor chain and adds every
+   * folder on the path to its `expanded` set so the row is visible. The
+   * `token` lets the parent re-fire the same command on the same note
+   * (e.g. user goes graph → Edit note → graph → Edit note on the same
+   * row): the effect re-runs whenever the token changes even if `nodeId`
+   * stayed the same. The command is deferred internally if folders/notes
+   * haven't loaded yet; once `loadAll` resolves the pending command
+   * applies. `null` clears any pending command.
+   */
+  expandToNote: { nodeId: string; token: number } | null;
 }
 
 const UNTITLED_PLACEHOLDER = "untitled";
@@ -248,6 +260,7 @@ export function NotesSidebar({
   onNoteDeleted,
   onClose,
   refreshKey,
+  expandToNote,
 }: Props) {
   const [notes, setNotes] = useState<KgNoteListEntry[] | null>(null);
   const [folders, setFolders] = useState<NoteFolder[] | null>(null);
@@ -327,6 +340,60 @@ export function NotesSidebar({
       return next;
     });
   }, [folders]);
+
+  // M6 phase 4: external "expand-to-this-note" command. The graph's
+  // `Edit note` flow asks us to make a specific note's row visible by
+  // expanding every folder on its ancestor chain. Effect re-runs whenever
+  // the token changes (so re-clicking `Edit note` on the same note re-fires
+  // the expansion) and also when `notes` / `folders` load — if the command
+  // arrived before either fetch resolved, we apply it on the next render
+  // that has the data. We use a ref to avoid re-applying the same token
+  // across unrelated re-renders (e.g. expanded-set changes).
+  const lastExpandToken = useRef<number | null>(null);
+  useEffect(() => {
+    if (expandToNote === null) {
+      lastExpandToken.current = null;
+      return;
+    }
+    if (notes === null || folders === null) return;
+    if (lastExpandToken.current === expandToNote.token) return;
+    const note = notes.find((n) => n.nodeId === expandToNote.nodeId);
+    // Note not in the list (deleted, or graph hit a non-note node) — nothing
+    // to expand to. Mark the token consumed so we don't loop on every render.
+    if (!note) {
+      lastExpandToken.current = expandToNote.token;
+      return;
+    }
+    // Unfiled note — root is always "visible" (no folder to expand into).
+    if (note.folderId === null) {
+      lastExpandToken.current = expandToNote.token;
+      return;
+    }
+    // Walk up the folder ancestor chain, accumulating ids. Defensive cap on
+    // the loop count in case a corrupted folders array introduces a cycle
+    // (the server prevents this, but client-side we still terminate).
+    const ancestors = new Set<number>();
+    const folderById = new Map(folders.map((f) => [f.id, f]));
+    let cursor: number | null = note.folderId;
+    let safety = folders.length + 1;
+    while (cursor !== null && safety > 0) {
+      ancestors.add(cursor);
+      cursor = folderById.get(cursor)?.parentId ?? null;
+      safety--;
+    }
+    lastExpandToken.current = expandToNote.token;
+    setExpanded((prev) => {
+      let changed = false;
+      const next = new Set(prev);
+      for (const id of ancestors) {
+        if (!next.has(id)) {
+          next.add(id);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [expandToNote, notes, folders]);
 
   // Stable identity of the current edit slot — `kind` plus the relevant
   // target id. Lets the auto-focus effect fire only when the *slot itself*
