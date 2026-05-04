@@ -87,6 +87,31 @@ interface DeletePromptState {
 }
 
 /**
+ * Drag-and-drop source: what the user is currently dragging. We track the
+ * row's current parent so a drop onto the same parent short-circuits to a
+ * no-op (no API round-trip, no flicker).
+ */
+type DragSource =
+  | { kind: "note"; nodeId: string; currentFolderId: number | null }
+  | { kind: "folder"; folderId: number; currentParentId: number | null };
+
+/**
+ * Drop target highlighted under the cursor. `root` is the top-of-sidebar
+ * "Unfiled" zone (un-files the dragged row). `folder` is any folder header.
+ */
+type DropTarget = { kind: "folder"; folderId: number } | { kind: "root" };
+
+/**
+ * Spring-loaded folder expansion delay. VSCode uses ~500ms; we round up to
+ * 600ms so it doesn't fire on a glance-pass over a folder.
+ */
+const SPRING_LOAD_MS = 600;
+/** Duration the rejection toast stays on screen. */
+const DRAG_TOAST_MS = 2500;
+/** Length of the shake animation (matches the `shake` keyframe in tailwind.config.ts). */
+const SHAKE_MS = 350;
+
+/**
  * Tree-assembly intermediate. Folders nest into `subfolders`; notes whose
  * `folderId` matches the folder's id slot into `notes`. Sorted siblings
  * are in stable order: folders by `sortOrder` then `name`; notes by the
@@ -241,6 +266,20 @@ export function NotesSidebar({
   const [expanded, setExpanded] = useState<Set<number>>(() => loadExpanded());
   const seededDefaultExpansion = useRef(false);
 
+  // Drag-and-drop state. `drag` is what's currently being dragged; `dropTarget`
+  // is the highlighted folder (or root zone) under the cursor. `shakeFolderId`
+  // flags a folder to play the rejection animation on. `dragToast` is the
+  // brief inline toast describing why a drop was rejected.
+  const [drag, setDrag] = useState<DragSource | null>(null);
+  const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
+  const [shakeFolderId, setShakeFolderId] = useState<number | null>(null);
+  const [dragToast, setDragToast] = useState<string | null>(null);
+  // Timers we own — cleared on transitions and on unmount. Storing them in
+  // refs avoids re-render churn that would happen if they lived in state.
+  const springLoadedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dragToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const shakeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Persist expanded state on every change. Cheap (a Set of small numbers
@@ -339,6 +378,30 @@ export function NotesSidebar({
     return buildTree(folders, notes);
   }, [folders, notes]);
 
+  // Precompute the set of folder ids that are descendants of the currently
+  // dragged folder. Used by the row's `onDragOver` to suppress the drop
+  // highlight (and the drop itself) on invalid targets, so the cursor shows
+  // the no-drop icon and the row doesn't visually accept the drop. Empty
+  // set when the user is dragging a note (no cycle concern) or not dragging.
+  const descendantsOfDrag = useMemo(() => {
+    if (drag === null || drag.kind !== "folder" || folders === null) {
+      return new Set<number>();
+    }
+    const out = new Set<number>();
+    const stack = [drag.folderId];
+    while (stack.length > 0) {
+      const id = stack.pop();
+      if (id === undefined) break;
+      for (const f of folders) {
+        if (f.parentId === id && !out.has(f.id)) {
+          out.add(f.id);
+          stack.push(f.id);
+        }
+      }
+    }
+    return out;
+  }, [drag, folders]);
+
   function toggleExpanded(id: number) {
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -346,6 +409,210 @@ export function NotesSidebar({
       else next.add(id);
       return next;
     });
+  }
+
+  // ─── Drag-and-drop ────────────────────────────────────────────────────
+
+  /**
+   * Set / clear the inline rejection toast. The toast is purely informational
+   * — the drop has already been refused at this point. Auto-dismisses after
+   * `DRAG_TOAST_MS` so the user isn't left with a stale message after a few
+   * unrelated clicks.
+   */
+  const showDragToast = useCallback((message: string) => {
+    setDragToast(message);
+    if (dragToastTimerRef.current !== null) clearTimeout(dragToastTimerRef.current);
+    dragToastTimerRef.current = setTimeout(() => {
+      setDragToast(null);
+      dragToastTimerRef.current = null;
+    }, DRAG_TOAST_MS);
+  }, []);
+
+  /**
+   * Trigger the shake animation on a folder row. The CSS animation runs once
+   * (it's not infinite); we clear `shakeFolderId` after the duration so a
+   * subsequent rejection on the same folder re-triggers the animation
+   * (without the clear, React would skip the re-render of the same value).
+   */
+  const triggerShake = useCallback((folderId: number) => {
+    setShakeFolderId(folderId);
+    if (shakeTimerRef.current !== null) clearTimeout(shakeTimerRef.current);
+    shakeTimerRef.current = setTimeout(() => {
+      setShakeFolderId(null);
+      shakeTimerRef.current = null;
+    }, SHAKE_MS);
+  }, []);
+
+  /**
+   * Clear all drag-derived UI state. Called on dragend (always fires, even
+   * after a successful drop) and after a successful drop's API call resolves.
+   */
+  const clearDragState = useCallback(() => {
+    setDrag(null);
+    setDropTarget(null);
+    if (springLoadedTimerRef.current !== null) {
+      clearTimeout(springLoadedTimerRef.current);
+      springLoadedTimerRef.current = null;
+    }
+  }, []);
+
+  // Spring-loaded folder expansion: while a drag is hovering a collapsed
+  // folder, expand it after `SPRING_LOAD_MS` so the user can reach nested
+  // drop targets without clicking-to-expand first. The effect re-runs on
+  // every dropTarget change, so moving the cursor between folders restarts
+  // the timer cleanly.
+  useEffect(() => {
+    if (springLoadedTimerRef.current !== null) {
+      clearTimeout(springLoadedTimerRef.current);
+      springLoadedTimerRef.current = null;
+    }
+    if (dropTarget === null || dropTarget.kind !== "folder") return;
+    const folderId = dropTarget.folderId;
+    if (expanded.has(folderId)) return;
+    springLoadedTimerRef.current = setTimeout(() => {
+      springLoadedTimerRef.current = null;
+      setExpanded((prev) => {
+        if (prev.has(folderId)) return prev;
+        const next = new Set(prev);
+        next.add(folderId);
+        return next;
+      });
+    }, SPRING_LOAD_MS);
+    return () => {
+      if (springLoadedTimerRef.current !== null) {
+        clearTimeout(springLoadedTimerRef.current);
+        springLoadedTimerRef.current = null;
+      }
+    };
+  }, [dropTarget, expanded]);
+
+  // Cleanup any straggling timers on unmount so we don't fire setState into
+  // an unmounted component (rare in practice — the sidebar lives as long as
+  // the user's session — but defensive).
+  useEffect(() => {
+    return () => {
+      if (springLoadedTimerRef.current !== null)
+        clearTimeout(springLoadedTimerRef.current);
+      if (dragToastTimerRef.current !== null) clearTimeout(dragToastTimerRef.current);
+      if (shakeTimerRef.current !== null) clearTimeout(shakeTimerRef.current);
+    };
+  }, []);
+
+  function handleDragStart(e: React.DragEvent, source: DragSource) {
+    // No global block on drag — even if a rename or create is mid-submit on
+    // a different row, the two ops are independent (different endpoints,
+    // different rows) and both end with their own `loadAll()`. The "can't
+    // drag a row that's currently rendered as the rename input" guard lives
+    // on the row itself via `draggable={!isRenaming}`.
+    setDrag(source);
+    e.dataTransfer.effectAllowed = "move";
+    // Firefox refuses to start a drag without `setData`. The payload itself
+    // is unused — we route the actual move through React state — but the
+    // call is required for the drag to fire at all.
+    try {
+      const label =
+        source.kind === "note" ? `note:${source.nodeId}` : `folder:${source.folderId}`;
+      e.dataTransfer.setData("text/plain", label);
+    } catch {
+      // ignore — Safari occasionally throws on `setData` in non-trusted contexts
+    }
+  }
+
+  function handleDragEnd() {
+    clearDragState();
+  }
+
+  /**
+   * Update the highlighted drop target on hover. Idempotent — only flips
+   * state when the target identity actually changes, so we don't re-render
+   * on every dragover frame.
+   */
+  function setDropHighlight(next: DropTarget | null) {
+    setDropTarget((prev) => {
+      if (prev === next) return prev;
+      if (prev !== null && next !== null && prev.kind === next.kind) {
+        if (prev.kind === "folder" && next.kind === "folder") {
+          if (prev.folderId === next.folderId) return prev;
+        } else if (prev.kind === "root" && next.kind === "root") {
+          return prev;
+        }
+      }
+      return next;
+    });
+  }
+
+  /**
+   * Compute the move from the current `drag` source onto the given target.
+   * Performs client-side cycle prevention for folder→folder; surfaces server
+   * errors via the toast/shake. On success refetches locally so the tree
+   * reflects the new shape immediately.
+   */
+  async function commitDrop(target: DropTarget) {
+    if (drag === null) return;
+    const targetFolderId = target.kind === "folder" ? target.folderId : null;
+
+    // No-op short-circuits — same parent for either kind. Dropping a row on
+    // its own current container shouldn't round-trip. Also: a folder dropped
+    // onto itself is the trivially-rejectable cycle case and gets the shake.
+    if (drag.kind === "folder" && target.kind === "folder") {
+      if (drag.folderId === target.folderId) {
+        triggerShake(target.folderId);
+        showDragToast("can't drop a folder onto itself");
+        clearDragState();
+        return;
+      }
+      if (descendantsOfDrag.has(target.folderId)) {
+        triggerShake(target.folderId);
+        showDragToast("can't drop a folder into one of its own descendants");
+        clearDragState();
+        return;
+      }
+      if (drag.currentParentId === target.folderId) {
+        clearDragState();
+        return;
+      }
+    }
+    if (drag.kind === "folder" && target.kind === "root") {
+      if (drag.currentParentId === null) {
+        clearDragState();
+        return;
+      }
+    }
+    if (drag.kind === "note" && target.kind === "folder") {
+      if (drag.currentFolderId === target.folderId) {
+        clearDragState();
+        return;
+      }
+    }
+    if (drag.kind === "note" && target.kind === "root") {
+      if (drag.currentFolderId === null) {
+        clearDragState();
+        return;
+      }
+    }
+
+    // Pre-clear the highlight so the row doesn't keep its drop-target ring
+    // while the API call is in flight. We hold onto `drag` only until the
+    // API resolves so handleDragEnd's clear is idempotent.
+    setDropTarget(null);
+    try {
+      if (drag.kind === "note") {
+        await api.moveNote(drag.nodeId, targetFolderId);
+      } else {
+        await api.patchFolder(drag.folderId, { parentId: targetFolderId });
+      }
+      await loadAll();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // The server's cycle/UNIQUE messages are descriptive enough to surface
+      // verbatim. We trim the leading "400 Bad Request — " noise.
+      const cleaned = msg.replace(/^\d{3}\s[^—]+—\s*/, "");
+      showDragToast(cleaned || "move failed");
+      // Shake the target folder so the source of the rejection is obvious.
+      if (target.kind === "folder") triggerShake(target.folderId);
+    } finally {
+      clearDragState();
+    }
   }
 
   // ─── Inline-edit lifecycle ────────────────────────────────────────────
@@ -583,7 +850,7 @@ export function NotesSidebar({
     edit === null;
 
   return (
-    <aside className="hidden lg:flex w-64 shrink-0 flex-col border-r border-zinc-900/80 bg-zinc-950 animate-fade-in">
+    <aside className="relative hidden lg:flex w-64 shrink-0 flex-col border-r border-zinc-900/80 bg-zinc-950 animate-fade-in">
       <div className="flex shrink-0 items-center gap-2 border-b border-zinc-900/80 px-4 py-2.5">
         <FileText className="h-3.5 w-3.5 text-zinc-500" />
         <span className="text-[11px] uppercase tracking-wider text-zinc-500">notes</span>
@@ -614,7 +881,61 @@ export function NotesSidebar({
         // empty-context menu (Add folder / Add note at root). Sub-rows
         // stop propagation so their own onContextMenu wins.
         onContextMenu={(e) => onContextMenu(e, { kind: "empty" })}
+        // The scroll container itself acts as a root-zone drop target so
+        // dragging onto the empty space below the tree un-files the row.
+        // Folder/note rows below stop propagation on their own dragover so
+        // their target wins. We only flip the highlight to "root" when no
+        // child row claimed the event.
+        onDragOver={(e) => {
+          if (drag === null) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "move";
+          setDropHighlight({ kind: "root" });
+        }}
+        onDragLeave={(e) => {
+          if (drag === null) return;
+          // Only clear when leaving the container itself, not on bubble-up
+          // from a child row crossing its own boundary.
+          if (e.currentTarget === e.target) {
+            setDropHighlight(null);
+          }
+        }}
+        onDrop={(e) => {
+          if (drag === null) return;
+          e.preventDefault();
+          void commitDrop({ kind: "root" });
+        }}
       >
+        {/* Sticky-top "Unfiled" drop zone — only visible while a drag is in
+            flight, so it doesn't take up sidebar real estate at rest. */}
+        {drag !== null && (
+          <div
+            className={`mb-1 flex items-center gap-2 rounded-md border border-dashed px-2 py-1.5 text-[11px] uppercase tracking-wider transition ${
+              dropTarget?.kind === "root"
+                ? "border-zinc-600 bg-zinc-800 text-zinc-200"
+                : "border-zinc-800 bg-zinc-950 text-zinc-500"
+            }`}
+            onDragOver={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              e.dataTransfer.dropEffect = "move";
+              setDropHighlight({ kind: "root" });
+            }}
+            onDragLeave={(e) => {
+              if (e.currentTarget === e.target) setDropHighlight(null);
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              void commitDrop({ kind: "root" });
+            }}
+            aria-label="drop here to un-file"
+          >
+            <FolderOpen className="h-3 w-3 opacity-70" />
+            <span>unfiled (root)</span>
+          </div>
+        )}
+
         {editError && (
           <p className="mb-2 px-2 text-xs text-red-400">action failed: {editError}</p>
         )}
@@ -648,6 +969,21 @@ export function NotesSidebar({
                 onContextMenu={onContextMenu}
                 selectedNoteId={selectedNoteId}
                 onSelectNote={onSelectNote}
+                drag={drag}
+                dropTarget={dropTarget}
+                shakeFolderId={shakeFolderId}
+                descendantsOfDrag={descendantsOfDrag}
+                onDragStartRow={handleDragStart}
+                onDragEndRow={handleDragEnd}
+                onDropOnFolder={(folderId) =>
+                  void commitDrop({ kind: "folder", folderId })
+                }
+                onDropOntoNotesParent={(folderId) =>
+                  void commitDrop(
+                    folderId === null ? { kind: "root" } : { kind: "folder", folderId },
+                  )
+                }
+                setDropHighlight={setDropHighlight}
               />
             ))}
 
@@ -693,12 +1029,34 @@ export function NotesSidebar({
                   onEditCancel={cancelEdit}
                   onSelectNote={onSelectNote}
                   onContextMenu={onContextMenu}
+                  drag={drag}
+                  onDragStartRow={handleDragStart}
+                  onDragEndRow={handleDragEnd}
+                  descendantsOfDrag={descendantsOfDrag}
+                  setDropHighlight={setDropHighlight}
+                  onDropOntoNotesParent={(folderId) =>
+                    void commitDrop(
+                      folderId === null ? { kind: "root" } : { kind: "folder", folderId },
+                    )
+                  }
                 />
               );
             })}
           </ul>
         )}
       </div>
+
+      {/* Toast: brief inline rejection message. Bottom-anchored so it doesn't
+          shove the tree around. Only visible while there's a message. */}
+      {dragToast !== null && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="pointer-events-none absolute bottom-3 left-3 right-3 z-30 rounded-md border border-zinc-800 bg-zinc-900/95 px-3 py-2 text-xs text-zinc-200 shadow-lg animate-fade-in"
+        >
+          {dragToast}
+        </div>
+      )}
 
       {menu !== null && (
         <ContextMenu menu={menu} onAction={handleMenuAction} onDismiss={closeMenu} />
@@ -732,6 +1090,25 @@ interface FolderRowProps {
   onContextMenu: (e: React.MouseEvent, target: MenuTarget) => void;
   selectedNoteId: string | null;
   onSelectNote: (nodeId: string, name: string) => void;
+  /** Currently-dragged source — passed down so rows can render the dimmed
+   *  state and skip drop handling on themselves. */
+  drag: DragSource | null;
+  /** Currently highlighted drop target — used to render the ring. */
+  dropTarget: DropTarget | null;
+  /** Folder id that should play the rejection shake on this render. */
+  shakeFolderId: number | null;
+  /** Set of folder ids that are descendants of the currently-dragged folder.
+   *  Used to suppress the drop highlight on invalid (cycle-creating) targets. */
+  descendantsOfDrag: Set<number>;
+  onDragStartRow: (e: React.DragEvent, source: DragSource) => void;
+  onDragEndRow: () => void;
+  /** Called when the user drops onto this folder's header row. */
+  onDropOnFolder: (folderId: number) => void;
+  /** Pass-through for `NoteRow`'s drop-onto-parent delegate (a hover over a
+   *  note row counts as a hover over its parent folder, which can be the
+   *  root if the note is unfiled). */
+  onDropOntoNotesParent: (folderId: number | null) => void;
+  setDropHighlight: (next: DropTarget | null) => void;
 }
 
 /**
@@ -758,10 +1135,28 @@ function FolderRow({
   onContextMenu,
   selectedNoteId,
   onSelectNote,
+  drag,
+  dropTarget,
+  shakeFolderId,
+  descendantsOfDrag,
+  onDragStartRow,
+  onDragEndRow,
+  onDropOnFolder,
+  onDropOntoNotesParent,
+  setDropHighlight,
 }: FolderRowProps) {
   const isRenaming = edit?.kind === "rename-folder" && edit.folderId === tf.folder.id;
   const isOpen = expanded.has(tf.folder.id);
   const padLeft = 8 + depth * 12;
+
+  // Drag-derived UI state for *this* folder row.
+  const isBeingDragged = drag?.kind === "folder" && drag.folderId === tf.folder.id;
+  const isDropHover =
+    dropTarget?.kind === "folder" && dropTarget.folderId === tf.folder.id;
+  const isShaking = shakeFolderId === tf.folder.id;
+  // True when this row is a descendant of the dragged folder — dropping the
+  // dragged folder here would create a cycle, so we suppress the drop.
+  const isDescendantOfDrag = descendantsOfDrag.has(tf.folder.id);
 
   return (
     <li>
@@ -782,7 +1177,59 @@ function FolderRow({
           type="button"
           onClick={() => toggleExpanded(tf.folder.id)}
           onContextMenu={(e) => onContextMenu(e, { kind: "folder", folder: tf.folder })}
-          className="flex w-full items-center gap-1 rounded-md py-1.5 pr-2 text-left text-sm text-zinc-300 transition hover:bg-zinc-900/60 hover:text-zinc-100"
+          // The folder header is both a draggable row (for re-nesting) and
+          // a drop target (for receiving dropped notes/folders). When the
+          // row is currently rendered as the rename input, the InlineEditRow
+          // branch above takes over — so this branch is only ever reached
+          // when the row is *not* in rename mode.
+          draggable={true}
+          onDragStart={(e) => {
+            // Stop the click from also triggering toggle-expanded — drag
+            // takes priority. The browser's native drag start already
+            // suppresses the click, but stopPropagation prevents an
+            // upstream `dragstart` from re-firing.
+            e.stopPropagation();
+            onDragStartRow(e, {
+              kind: "folder",
+              folderId: tf.folder.id,
+              currentParentId: tf.folder.parentId,
+            });
+          }}
+          onDragEnd={onDragEndRow}
+          onDragOver={(e) => {
+            if (drag === null) return;
+            // Suppress dragover (no preventDefault → no drop allowed, no
+            // highlight) for invalid targets so the cursor shows the
+            // no-drop icon and the row doesn't pretend to be a target:
+            //   - dragging this same folder onto itself
+            //   - dragging a folder onto one of its descendants
+            // Server still rejects either case if a custom drop slipped
+            // through (defense in depth via `commitDrop`'s pre-flight),
+            // but the visual stays honest.
+            if (drag.kind === "folder") {
+              if (drag.folderId === tf.folder.id) return;
+              if (isDescendantOfDrag) return;
+            }
+            e.preventDefault();
+            e.stopPropagation();
+            e.dataTransfer.dropEffect = "move";
+            setDropHighlight({ kind: "folder", folderId: tf.folder.id });
+          }}
+          // No onDragLeave handler — the next dragover (sibling row, or the
+          // scroll container) sets its own highlight, and dragend clears
+          // everything. Letting dragleave fire would cause flicker when the
+          // cursor crosses into a child element of this same row.
+          onDrop={(e) => {
+            if (drag === null) return;
+            e.preventDefault();
+            e.stopPropagation();
+            onDropOnFolder(tf.folder.id);
+          }}
+          className={`flex w-full items-center gap-1 rounded-md py-1.5 pr-2 text-left text-sm text-zinc-300 transition hover:bg-zinc-900/60 hover:text-zinc-100 ${
+            isBeingDragged ? "opacity-50" : ""
+          } ${
+            isDropHover ? "bg-zinc-800 ring-1 ring-zinc-600" : ""
+          } ${isShaking ? "animate-shake" : ""}`}
           style={{ paddingLeft: padLeft }}
         >
           {isOpen ? (
@@ -837,6 +1284,15 @@ function FolderRow({
               onContextMenu={onContextMenu}
               selectedNoteId={selectedNoteId}
               onSelectNote={onSelectNote}
+              drag={drag}
+              dropTarget={dropTarget}
+              shakeFolderId={shakeFolderId}
+              descendantsOfDrag={descendantsOfDrag}
+              onDragStartRow={onDragStartRow}
+              onDragEndRow={onDragEndRow}
+              onDropOnFolder={onDropOnFolder}
+              onDropOntoNotesParent={onDropOntoNotesParent}
+              setDropHighlight={setDropHighlight}
             />
           ))}
 
@@ -858,6 +1314,12 @@ function FolderRow({
                 onEditCancel={onEditCancel}
                 onSelectNote={onSelectNote}
                 onContextMenu={onContextMenu}
+                drag={drag}
+                onDragStartRow={onDragStartRow}
+                onDragEndRow={onDragEndRow}
+                descendantsOfDrag={descendantsOfDrag}
+                setDropHighlight={setDropHighlight}
+                onDropOntoNotesParent={onDropOntoNotesParent}
               />
             );
           })}
@@ -880,6 +1342,17 @@ interface NoteRowProps {
   onEditCancel: () => void;
   onSelectNote: (nodeId: string, name: string) => void;
   onContextMenu: (e: React.MouseEvent, target: MenuTarget) => void;
+  /** Active drag source — used to dim the row when this note is being dragged. */
+  drag: DragSource | null;
+  onDragStartRow: (e: React.DragEvent, source: DragSource) => void;
+  onDragEndRow: () => void;
+  /** Set of folder ids that are descendants of the currently-dragged folder.
+   *  Note rows in a descendant folder shouldn't claim a hover highlight on
+   *  behalf of a cycle-creating parent. */
+  descendantsOfDrag: Set<number>;
+  setDropHighlight: (next: DropTarget | null) => void;
+  /** Drop into a specific folder (or root, when `folderId === null`). */
+  onDropOntoNotesParent: (folderId: number | null) => void;
 }
 
 function NoteRow({
@@ -895,6 +1368,12 @@ function NoteRow({
   onEditCancel,
   onSelectNote,
   onContextMenu,
+  drag,
+  onDragStartRow,
+  onDragEndRow,
+  descendantsOfDrag,
+  setDropHighlight,
+  onDropOntoNotesParent,
 }: NoteRowProps) {
   if (isRenaming && edit && inputRef) {
     return (
@@ -914,17 +1393,59 @@ function NoteRow({
     );
   }
   const padLeft = 8 + depth * 12;
+  const isBeingDragged = drag?.kind === "note" && drag.nodeId === note.nodeId;
   return (
     <li>
       <button
         type="button"
         onClick={() => onSelectNote(note.nodeId, note.name)}
         onContextMenu={(e) => onContextMenu(e, { kind: "note", note })}
+        // Note rows are draggable but not first-class drop targets — folders
+        // receive the drop. We do, however, delegate hover to the note's
+        // *parent* folder (matching VSCode's explorer): hovering a note
+        // inside FolderA highlights FolderA so the drop visually lands "in
+        // here". The rename branch above already swaps this out for an
+        // InlineEditRow, so reaching this code path means the row isn't
+        // being renamed.
+        draggable={true}
+        onDragStart={(e) => {
+          e.stopPropagation();
+          onDragStartRow(e, {
+            kind: "note",
+            nodeId: note.nodeId,
+            currentFolderId: note.folderId,
+          });
+        }}
+        onDragEnd={onDragEndRow}
+        onDragOver={(e) => {
+          if (drag === null) return;
+          // If the dragged folder *is* this note's parent or one of its
+          // descendants (impossible since notes only live in one folder, but
+          // defensive), suppress so the drop falls back to root.
+          if (drag.kind === "folder" && note.folderId !== null) {
+            if (drag.folderId === note.folderId) return;
+            if (descendantsOfDrag.has(note.folderId)) return;
+          }
+          e.preventDefault();
+          e.stopPropagation();
+          e.dataTransfer.dropEffect = "move";
+          setDropHighlight(
+            note.folderId === null
+              ? { kind: "root" }
+              : { kind: "folder", folderId: note.folderId },
+          );
+        }}
+        onDrop={(e) => {
+          if (drag === null) return;
+          e.preventDefault();
+          e.stopPropagation();
+          onDropOntoNotesParent(note.folderId);
+        }}
         className={`flex w-full items-center gap-2 rounded-md py-1.5 pr-2 text-left text-sm transition ${
           active
             ? "bg-zinc-900 text-zinc-100"
             : "text-zinc-400 hover:bg-zinc-900/60 hover:text-zinc-200"
-        }`}
+        } ${isBeingDragged ? "opacity-50" : ""}`}
         style={{ paddingLeft: padLeft }}
       >
         <FileText className="h-3.5 w-3.5 shrink-0 opacity-60" />
