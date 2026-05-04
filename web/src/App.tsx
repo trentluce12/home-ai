@@ -453,9 +453,12 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
     }
   }
 
-  function handleCloseMemoryPanel() {
-    setMemoryPanelClosed(true);
-    saveMemoryPanelClosed(true);
+  function handleToggleMemoryPanel() {
+    setMemoryPanelClosed((prev) => {
+      const next = !prev;
+      saveMemoryPanelClosed(next);
+      return next;
+    });
   }
 
   async function handleLogout() {
@@ -593,8 +596,9 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
 
         <MemoryPanel
           events={memoryEvents}
-          visible={!empty && !memoryPanelClosed && !notesOpen && !graphView}
-          onClose={handleCloseMemoryPanel}
+          visible={!empty && !notesOpen && !graphView}
+          collapsed={memoryPanelClosed}
+          onToggleCollapse={handleToggleMemoryPanel}
         />
       </div>
 
