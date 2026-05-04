@@ -129,11 +129,11 @@ Phased — four phases, tasks tracked in `tasks/planned/`.
 - [x] `m6p1-sidebar-sections` — restructure left sidebar with `Agents` + `Knowledge` collapsible sections; chats move under Agents; Notes / Knowledge Graph buttons under Knowledge; header `Network` icon retires.
 - [x] `m6p1-memory-contextual` — demote memory panel to chat-only with slide-in + resizable drag handle + collapsible close button; persist collapsed state across sessions.
 
-### Phase 2 — notes view + secondary sidebar (planned)
+### Phase 2 — notes view + secondary sidebar (shipped ✓)
 
-- [ ] `m6p2-notes-view-shell` — secondary sidebar slides out when Notes is selected (flat list, no hierarchy yet); main-panel modes for preview-only + split editor/preview; `Edit` button toggles between them.
-- [ ] `m6p2-note-name-field` — add `name TEXT NOT NULL` column to `node_notes`; backfill existing rows with the node's name; surface the note's own name in tree / preview header / dashboard widget; rename decoupled from node-rename.
-- [ ] `m6p2-note-creation-flow` — VSCode-style inline note creation with `untitled` placeholder; new `Generic` entity type added to the taxonomy as the default for inline-created notes.
+- [x] `m6p2-notes-view-shell` — secondary sidebar slides out when Notes is selected (flat list, no hierarchy yet); main-panel modes for preview-only + split editor/preview; `Edit` button toggles between them.
+- [x] `m6p2-note-name-field` — add `name TEXT NOT NULL` column to `node_notes`; backfill existing rows with the node's name; surface the note's own name in tree / preview header / dashboard widget; rename decoupled from node-rename.
+- [x] `m6p2-note-creation-flow` — VSCode-style inline note creation with `untitled` placeholder; new `Generic` entity type added to the taxonomy as the default for inline-created notes.
 
 ### Phase 3 — folder data model + CRUD (planned)
 
