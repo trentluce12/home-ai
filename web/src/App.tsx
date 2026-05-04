@@ -7,6 +7,8 @@ import { EmptyDashboard } from "./components/EmptyDashboard";
 import { GraphView } from "./components/GraphView";
 import { Login } from "./components/Login";
 import { ApprovalModal } from "./components/ApprovalModal";
+import { NotesSidebar } from "./components/NotesSidebar";
+import { NotesView } from "./components/NotesView";
 import {
   api,
   SERVER_URL,
@@ -94,6 +96,16 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
   // so GraphView can focus + populate its detail panel automatically. Reset
   // to null on close so a subsequent toolbar-button open doesn't re-focus.
   const [graphFocusNodeId, setGraphFocusNodeId] = useState<string | null>(null);
+  // Notes view state. `notesOpen` toggles the secondary sidebar + notes-context
+  // main-panel. `selectedNote` holds the row info for the currently-selected
+  // note (null = notes-context dashboard variant). The row carries the display
+  // name so `NotesView` can render its header without a second fetch — the
+  // secondary sidebar already lists `KgNoteListEntry`s with name + type.
+  const [notesOpen, setNotesOpen] = useState(false);
+  const [selectedNote, setSelectedNote] = useState<{
+    nodeId: string;
+    name: string;
+  } | null>(null);
   const [showJumpPill, setShowJumpPill] = useState(false);
   const [approvalRequest, setApprovalRequest] = useState<ApprovalRequest | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -148,6 +160,10 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
     setError(null);
     setInput("");
     setApprovalRequest(null);
+    // Tear down the notes view if it was open — opening (or new-chatting)
+    // returns the user to the chat surface.
+    setNotesOpen(false);
+    setSelectedNote(null);
     stickToBottomRef.current = true;
     setShowJumpPill(false);
   }
@@ -160,11 +176,32 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
       const history = await api.sessionHistory(id);
       setMessages(history);
       setSessionId(id);
+      // Selecting a chat tears down the notes view (memory panel re-opens
+      // contextually as part of the active-chat layout).
+      setNotesOpen(false);
+      setSelectedNote(null);
       stickToBottomRef.current = true;
       setShowJumpPill(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  function handleToggleNotes() {
+    setNotesOpen((curr) => {
+      if (curr) {
+        // Closing — also clear the selected note so re-opening lands on
+        // the notes-context dashboard (consistent with re-clicking `Notes`
+        // = "back to the notes home").
+        setSelectedNote(null);
+        return false;
+      }
+      return true;
+    });
+  }
+
+  function handleSelectNote(nodeId: string, name: string) {
+    setSelectedNote({ nodeId, name });
   }
 
   function stop() {
@@ -370,43 +407,71 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
           onNewChat={handleNewChat}
           refreshKey={refreshKey}
           onOpenGraph={() => setGraphOpen(true)}
-          onOpenNotes={() => {
-            // Notes view lands in m6p2; this is a no-op placeholder so the
-            // button is wired and keyboard-discoverable in phase 1.
-            alert("Notes view coming in phase 2.");
-          }}
+          onOpenNotes={handleToggleNotes}
         />
+
+        {notesOpen && (
+          <NotesSidebar
+            selectedNoteId={selectedNote?.nodeId ?? null}
+            onSelectNote={handleSelectNote}
+            onClose={handleToggleNotes}
+            refreshKey={refreshKey}
+          />
+        )}
 
         <main
           ref={scrollRef}
           onScroll={onScroll}
           className="relative flex-1 overflow-y-auto"
         >
-          <div className="mx-auto flex h-full max-w-2xl flex-col px-6 py-10">
-            {empty ? (
-              <EmptyDashboard
-                refreshKey={refreshKey}
+          {notesOpen ? (
+            selectedNote ? (
+              <NotesView
+                key={selectedNote.nodeId}
+                nodeId={selectedNote.nodeId}
+                title={selectedNote.name}
                 onChange={() => setRefreshKey((k) => k + 1)}
-                onOpenNode={(id) => {
-                  setGraphFocusNodeId(id);
-                  setGraphOpen(true);
-                }}
               />
             ) : (
-              <div className="flex flex-col gap-6">
-                {messages.map((m, i) => (
-                  <MessageBubble key={i} message={m} />
-                ))}
-                {error && (
-                  <div className="rounded-lg border border-red-900/60 bg-red-950/30 px-4 py-2.5 text-sm text-red-300 animate-fade-in">
-                    {error}
-                  </div>
-                )}
-                <div ref={bottomRef} />
+              <div className="mx-auto flex h-full max-w-2xl flex-col px-6 py-10">
+                <EmptyDashboard
+                  variant="notes"
+                  refreshKey={refreshKey}
+                  onChange={() => setRefreshKey((k) => k + 1)}
+                  onOpenNode={(id) => {
+                    setGraphFocusNodeId(id);
+                    setGraphOpen(true);
+                  }}
+                />
               </div>
-            )}
-          </div>
-          {showJumpPill && !empty && (
+            )
+          ) : (
+            <div className="mx-auto flex h-full max-w-2xl flex-col px-6 py-10">
+              {empty ? (
+                <EmptyDashboard
+                  refreshKey={refreshKey}
+                  onChange={() => setRefreshKey((k) => k + 1)}
+                  onOpenNode={(id) => {
+                    setGraphFocusNodeId(id);
+                    setGraphOpen(true);
+                  }}
+                />
+              ) : (
+                <div className="flex flex-col gap-6">
+                  {messages.map((m, i) => (
+                    <MessageBubble key={i} message={m} />
+                  ))}
+                  {error && (
+                    <div className="rounded-lg border border-red-900/60 bg-red-950/30 px-4 py-2.5 text-sm text-red-300 animate-fade-in">
+                      {error}
+                    </div>
+                  )}
+                  <div ref={bottomRef} />
+                </div>
+              )}
+            </div>
+          )}
+          {showJumpPill && !empty && !notesOpen && (
             <button
               onClick={jumpToLatest}
               aria-label="jump to latest"
@@ -420,50 +485,52 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
 
         <MemoryPanel
           events={memoryEvents}
-          visible={!empty && !memoryPanelClosed}
+          visible={!empty && !memoryPanelClosed && !notesOpen}
           onClose={handleCloseMemoryPanel}
         />
       </div>
 
-      <footer className="shrink-0 border-t border-zinc-900/80 px-6 py-4">
-        <div className="mx-auto max-w-2xl">
-          <div className="relative flex items-end gap-2 rounded-2xl border border-zinc-800 bg-zinc-900/60 px-4 py-3 backdrop-blur transition-colors focus-within:border-zinc-700 focus-within:bg-zinc-900">
-            <textarea
-              ref={textareaRef}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={onKeyDown}
-              placeholder="message home-ai…"
-              rows={1}
-              className="flex-1 resize-none bg-transparent text-zinc-100 placeholder:text-zinc-600 focus:outline-none"
-            />
-            {streaming ? (
-              <button
-                onClick={stop}
-                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-zinc-100 text-zinc-900 transition hover:bg-white"
-                aria-label="stop"
-                title="Stop"
-              >
-                <Square className="h-3.5 w-3.5" strokeWidth={2.5} fill="currentColor" />
-              </button>
-            ) : (
-              <button
-                onClick={send}
-                disabled={!input.trim()}
-                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-zinc-100 text-zinc-900 transition hover:bg-white disabled:bg-zinc-800 disabled:text-zinc-600"
-                aria-label="send"
-              >
-                <ArrowUp className="h-4 w-4" strokeWidth={2.5} />
-              </button>
-            )}
+      {!notesOpen && (
+        <footer className="shrink-0 border-t border-zinc-900/80 px-6 py-4">
+          <div className="mx-auto max-w-2xl">
+            <div className="relative flex items-end gap-2 rounded-2xl border border-zinc-800 bg-zinc-900/60 px-4 py-3 backdrop-blur transition-colors focus-within:border-zinc-700 focus-within:bg-zinc-900">
+              <textarea
+                ref={textareaRef}
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={onKeyDown}
+                placeholder="message home-ai…"
+                rows={1}
+                className="flex-1 resize-none bg-transparent text-zinc-100 placeholder:text-zinc-600 focus:outline-none"
+              />
+              {streaming ? (
+                <button
+                  onClick={stop}
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-zinc-100 text-zinc-900 transition hover:bg-white"
+                  aria-label="stop"
+                  title="Stop"
+                >
+                  <Square className="h-3.5 w-3.5" strokeWidth={2.5} fill="currentColor" />
+                </button>
+              ) : (
+                <button
+                  onClick={send}
+                  disabled={!input.trim()}
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-zinc-100 text-zinc-900 transition hover:bg-white disabled:bg-zinc-800 disabled:text-zinc-600"
+                  aria-label="send"
+                >
+                  <ArrowUp className="h-4 w-4" strokeWidth={2.5} />
+                </button>
+              )}
+            </div>
+            <p className="mt-2 text-center text-xs text-zinc-600">
+              {streaming
+                ? "click stop to interrupt"
+                : "enter to send · shift + enter for newline"}
+            </p>
           </div>
-          <p className="mt-2 text-center text-xs text-zinc-600">
-            {streaming
-              ? "click stop to interrupt"
-              : "enter to send · shift + enter for newline"}
-          </p>
-        </div>
-      </footer>
+        </footer>
+      )}
 
       <GraphView
         open={graphOpen}

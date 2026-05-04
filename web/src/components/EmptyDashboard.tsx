@@ -15,9 +15,35 @@ interface Props {
   refreshKey: number;
   onChange: () => void;
   onOpenNode: (nodeId: string) => void;
+  /**
+   * `agents` — default; full kitchen-sink KG widget set (stats, recent,
+   * notes, add-fact, forget, export, import). Shown when the user is on
+   * the chat dashboard with no chat selected.
+   *
+   * `notes` — Notes section is active in the secondary sidebar but no
+   * specific note is selected. Recent-notes panel is moved to the top and
+   * emphasized; the heavy agents-context KG widgets (add-fact, forget,
+   * import) are hidden so the surface stays focused on browsing notes.
+   */
+  variant?: "agents" | "notes";
 }
 
-export function EmptyDashboard({ refreshKey, onChange, onOpenNode }: Props) {
+export function EmptyDashboard({
+  refreshKey,
+  onChange,
+  onOpenNode,
+  variant = "agents",
+}: Props) {
+  if (variant === "notes") {
+    return (
+      <div className="mx-auto flex w-full max-w-xl flex-col gap-10 animate-fade-in">
+        <NotesHero />
+        <NotesPanel refreshKey={refreshKey} onOpenNode={onOpenNode} />
+        <StatsAndRecent refreshKey={refreshKey} />
+        <ExportRow />
+      </div>
+    );
+  }
   return (
     <div className="mx-auto flex w-full max-w-xl flex-col gap-10 animate-fade-in">
       <Hero />
@@ -27,6 +53,15 @@ export function EmptyDashboard({ refreshKey, onChange, onOpenNode }: Props) {
       <ForgetForm onChange={onChange} />
       <ExportRow />
       <ImportRow onChange={onChange} />
+    </div>
+  );
+}
+
+function NotesHero() {
+  return (
+    <div className="text-center">
+      <p className="text-3xl font-medium tracking-tight text-zinc-200">notes.</p>
+      <p className="mt-2 text-sm text-zinc-500">pick one from the sidebar.</p>
     </div>
   );
 }
