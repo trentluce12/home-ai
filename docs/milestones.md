@@ -135,11 +135,11 @@ Phased — four phases, tasks tracked in `tasks/planned/`.
 - [x] `m6p2-note-name-field` — add `name TEXT NOT NULL` column to `node_notes`; backfill existing rows with the node's name; surface the note's own name in tree / preview header / dashboard widget; rename decoupled from node-rename.
 - [x] `m6p2-note-creation-flow` — VSCode-style inline note creation with `untitled` placeholder; new `Generic` entity type added to the taxonomy as the default for inline-created notes.
 
-### Phase 3 — folder data model + CRUD (planned)
+### Phase 3 — folder data model + CRUD (shipped ✓)
 
-- [ ] `m6p3-folder-schema` — `note_folders(id, name, parent_id NULL, sort_order)` table; `folder_id NULL FK` on `node_notes`; tree state persistence.
-- [ ] `m6p3-folder-crud` — context-sensitive right-click menu (Add subfolder / Add note / Rename / Delete on folders; Rename / Delete on notes; Add folder / Add note on empty space); inline rename via right-click; non-empty-delete prompt with move-to-unfiled default.
-- [ ] `m6p3-folder-dragdrop` — drag-and-drop notes between folders, folders into folders, drop to root for unfiled.
+- [x] `m6p3-folder-schema` — `note_folders(id, name, parent_id NULL, sort_order)` table; `folder_id NULL FK` on `node_notes`; tree state persistence.
+- [x] `m6p3-folder-crud` — context-sensitive right-click menu (Add subfolder / Add note / Rename / Delete on folders; Rename / Delete on notes; Add folder / Add note on empty space); inline rename via right-click; non-empty-delete prompt with move-to-unfiled default.
+- [x] `m6p3-folder-dragdrop` — drag-and-drop notes between folders, folders into folders, drop to root for unfiled.
 
 ### Phase 4 — graph view as main panel (planned)
 
