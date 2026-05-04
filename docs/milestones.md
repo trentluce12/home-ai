@@ -118,7 +118,7 @@ Phased like M4 — three phases, six stories tracked in `tasks/planned/`.
 
 - [x] `m5p3-propose-node-merge` — collapse N duplicate nodes into 1 (edges deduped, body unified, embeddings regenerated, provenance rewritten, source nodes dropped) in one transaction. Most complex tool; lands on its own.
 
-## M6 — Knowledge sidebar (planned)
+## M6 — Knowledge sidebar (shipped ✓)
 
 A layout + organization pass on top of M5. The left sidebar reorganizes into `Agents` (chats) and `Knowledge` (Notes / Knowledge Graph) sections; notes get a folder-tree-organized browse surface (VSCode explorer ergonomics) with notes parented in user-defined folders; the underlying KG nodes-and-edges substrate stays untouched (folders are pure UI). Graph view demotes from header-modal to inline main-panel view; the right-side memory panel demotes from always-visible to contextual chat-only. Notes get their own `name` independent of the underlying node, and a new `Generic` entity type lands as the default for inline-created notes. Design landed 2026-05-03 in `docs/design.md`.
 
@@ -141,6 +141,6 @@ Phased — four phases, tasks tracked in `tasks/planned/`.
 - [x] `m6p3-folder-crud` — context-sensitive right-click menu (Add subfolder / Add note / Rename / Delete on folders; Rename / Delete on notes; Add folder / Add note on empty space); inline rename via right-click; non-empty-delete prompt with move-to-unfiled default.
 - [x] `m6p3-folder-dragdrop` — drag-and-drop notes between folders, folders into folders, drop to root for unfiled.
 
-### Phase 4 — graph view as main panel (planned)
+### Phase 4 — graph view as main panel (shipped ✓)
 
-- [ ] `m6p4-graph-inline` — move graph from header-modal to inline main-panel view; bigger detail panel by default; note section is preview-only with an `Edit` button that navigates to the Notes view, expands the tree, and opens the note in split-edit mode.
+- [x] `m6p4-graph-inline` — move graph from header-modal to inline main-panel view; bigger detail panel by default; note section is preview-only with an `Edit` button that navigates to the Notes view, expands the tree, and opens the note in split-edit mode.

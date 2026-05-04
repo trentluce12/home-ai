@@ -12,7 +12,23 @@ A personal AI: streaming chat UI on top of the Anthropic API. Knowledge graph co
 
 Newest first. Append entries; don't edit history.
 
-### 2026-05-03 · M6 — Knowledge sidebar (planned)
+### 2026-05-03 · M6 — Knowledge sidebar (shipped)
+
+All four phases shipped on `dev-tl` in a single sequential run. Highlights from the implementation that diverged from or extended the original plan:
+
+**Note name decoupling carries asymmetric defaults.** Adding `node_notes.name` was the architectural hinge. `setNote(nodeId, body)` (no name) preserves the existing name on update and defaults to the node's name on first insert — so the existing `propose_note_edit` agent tool and the per-node detail editor stay body-only. Renames go through the new `PATCH /api/kg/node/:id/note` `{name}` route. Retrieval context (`server/src/kg/retrieve.ts`) intentionally still keys off the node's name (`Person:Alice`) for the "note (Alice): preview…" header, not the note's own name. The agent's anchor identity stays the node; the note name is a UI-surface concern.
+
+**Latent FK gap on existing `data/kg.sqlite` databases.** During phase 3 the implementer noticed `node_notes` lacked the `node_id → nodes(id) ON DELETE CASCADE` FK on the user's existing DB (PRAGMA foreign_key_list returned only the new `folder_id` FK). Fresh DBs declare the FK correctly via SCHEMA_SQL, but `CREATE TABLE IF NOT EXISTS` doesn't retrofit constraints on already-created tables. `m6p3-folder-schema`'s cascade-delete branch defensively `DELETE FROM node_notes WHERE node_id = ?` before calling `deleteNode(...)` so it works on both fresh and migrated DBs, but other paths (`forget`, `mergeNodes`'s remaining surfaces) may still leak orphan note rows on the legacy schema. A follow-up task in the spawned-task chip queue will repair the FK via the table-rebuild idiom (`CREATE TABLE node_notes_new AS ...` + copy + drop + rename).
+
+**`Generic` color slot.** Added `#52525b` (zinc-600) to GraphView's TYPE_COLORS palette, distinct from `Person` (zinc-400) and `Topic` (zinc-500) but in the same family — reads as the "neutral default" for inline-created notes that haven't been upgraded to a typed node yet. Filter chips iterate over `presentTypes` from live graph data, so `Generic` shows up automatically once any `Generic`-typed node exists.
+
+**Token-keyed `expandToNote` command.** The Edit-note button in the inline graph view's detail panel needs to drive the NotesSidebar from outside (expand the folder ancestor chain, select the note, switch to split-edit mode). Implemented as `{nodeId, token}` where the token increments per dispatch — NotesSidebar tracks `lastExpandToken` in a ref to fire the effect once per command rather than on every prop change. Clears to `null` when the user closes Notes so the command doesn't replay on a future Notes open.
+
+**Sidebar-section state, memory width, tree expansion all persist.** `home-ai:sidebar:section:<id>` (1/0), `home-ai:memory-panel:width` (px, clamped 224–384), `home-ai:notes-sidebar:expanded` (Set of folder ids serialized as JSON). Try/catch around all reads + writes (Safari private mode + disabled-storage safe). Memory close-state is sessionStorage (per-tab); everything else is localStorage (cross-tab).
+
+**Width-based slide animation, not transform-based.** Memory panel collapse/expand uses `transition-[width]` on the wrapper aside with `overflow-hidden` clipping the inner content. Reads as a wipe from the right edge while keeping the chat reflowing naturally. A `transform: translateX` overlay would have occluded the chat content during the slide — flagged as the canonical animation pattern for any future contextual side panels.
+
+### 2026-05-03 · M6 — Knowledge sidebar (planning entry — superseded by the shipped entry above)
 
 A layout + organization pass on top of M5. The motivating problem: notes are powerful but have no native browse surface — the only way to add or find one is to navigate to its node in the graph modal. Folders have no place in the structured KG, but as a UI organization layer over the user's notes, they're exactly what's missing. M6 introduces a `Knowledge` section in the left sidebar with two views — Notes (folder-tree-organized) and Knowledge Graph (the existing Sigma surface, demoted from header-modal to inline main-panel view).
 
