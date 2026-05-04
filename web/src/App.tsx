@@ -218,6 +218,28 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
     setSelectedNote({ nodeId, name, initialMode: "split" });
   }
 
+  // M6 phase 3: invoked after the right-click `Rename` flow on a note row
+  // commits. Update the in-memory `selectedNote.name` if the renamed note
+  // is the one currently open in the main panel (otherwise the header
+  // would render the stale label until the user clicks something else).
+  // Also bump `refreshKey` so the dashboard's recent-notes panel and any
+  // other surface depending on note metadata picks up the new label.
+  function handleNoteRenamed(nodeId: string, newName: string) {
+    setRefreshKey((k) => k + 1);
+    setSelectedNote((curr) =>
+      curr && curr.nodeId === nodeId ? { ...curr, name: newName } : curr,
+    );
+  }
+
+  // M6 phase 3: invoked after the right-click `Delete` flow on a note row
+  // commits (or after a folder cascade-delete that included the active note).
+  // Clear `selectedNote` if it matches so the main panel falls back to the
+  // notes-context dashboard rather than rendering against a now-deleted node.
+  function handleNoteDeleted(nodeId: string) {
+    setRefreshKey((k) => k + 1);
+    setSelectedNote((curr) => (curr && curr.nodeId === nodeId ? null : curr));
+  }
+
   function stop() {
     abortRef.current?.abort();
   }
@@ -429,6 +451,8 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
             selectedNoteId={selectedNote?.nodeId ?? null}
             onSelectNote={handleSelectNote}
             onCreateNote={handleCreateNote}
+            onNoteRenamed={handleNoteRenamed}
+            onNoteDeleted={handleNoteDeleted}
             onClose={handleToggleNotes}
             refreshKey={refreshKey}
           />

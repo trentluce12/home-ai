@@ -1,6 +1,14 @@
-import { useEffect, useRef, useState } from "react";
-import { FileText, Plus, X } from "lucide-react";
-import { api, type KgNoteListEntry } from "../lib/api";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  ChevronDown,
+  ChevronRight,
+  FileText,
+  Folder,
+  FolderOpen,
+  Plus,
+  X,
+} from "lucide-react";
+import { api, type KgNoteListEntry, type NoteFolder } from "../lib/api";
 
 interface Props {
   /**
@@ -11,19 +19,29 @@ interface Props {
   /**
    * Called when the user picks a note row. The display `name` is forwarded
    * so the parent can pass it to `NotesView` for the preview/split header
-   * without a second round-trip. M6 phase 2: this is now the note's own
-   * `name` (from `node_notes.name`), not the underlying node's name.
+   * without a second round-trip.
    */
   onSelectNote: (nodeId: string, name: string) => void;
   /**
    * Called when the inline-create flow successfully commits a new note.
-   * The parent (a) bumps refreshKey so this sidebar re-fetches the list
-   * (the new row was already optimistically rendered, but the canonical
-   * order/preview comes from the server), (b) selects the new row, and
-   * (c) tells `NotesView` to mount in split-edit mode so the user can
-   * start typing the body immediately.
+   * The parent (a) bumps refreshKey so other surfaces re-fetch, (b) selects
+   * the new row, and (c) tells `NotesView` to mount in split-edit mode so
+   * the user can start typing the body immediately.
    */
   onCreateNote: (nodeId: string, name: string) => void;
+  /**
+   * Called after a note's name is changed via the right-click `Rename`
+   * action (M6 phase 3). Lets the parent update `selectedNote.name` if it
+   * matches the renamed note, and bump `refreshKey` so the dashboard's
+   * recent-notes panel picks up the new label.
+   */
+  onNoteRenamed: (nodeId: string, newName: string) => void;
+  /**
+   * Called after a note is deleted via the right-click `Delete` action
+   * (M6 phase 3). Lets the parent clear `selectedNote` if the deleted note
+   * was active, plus bump `refreshKey`.
+   */
+  onNoteDeleted: (nodeId: string) => void;
   /** Click X (or click `Notes` in the primary sidebar again) to collapse. */
   onClose: () => void;
   /**
@@ -35,101 +53,534 @@ interface Props {
 }
 
 const UNTITLED_PLACEHOLDER = "untitled";
+const EXPANDED_STORAGE_KEY = "home-ai:notes-sidebar:expanded";
+
+/**
+ * Shape of an inline-edit slot. Only one is active at a time. `kind` picks
+ * the verb, the rest of the fields are context for the commit handler.
+ */
+type EditState =
+  | { kind: "create-folder"; parentId: number | null; draft: string }
+  | { kind: "create-note"; parentId: number | null; draft: string }
+  | { kind: "rename-folder"; folderId: number; draft: string }
+  | { kind: "rename-note"; nodeId: string; draft: string };
+
+/**
+ * Custom right-click menu state. `target` describes what the user
+ * right-clicked, which controls which menu items render.
+ */
+type MenuTarget =
+  | { kind: "folder"; folder: NoteFolder }
+  | { kind: "note"; note: KgNoteListEntry }
+  | { kind: "empty" };
+
+interface MenuState {
+  x: number;
+  y: number;
+  target: MenuTarget;
+}
+
+interface DeletePromptState {
+  folder: NoteFolder;
+  noteCount: number;
+  subfolderCount: number;
+}
+
+/**
+ * Tree-assembly intermediate. Folders nest into `subfolders`; notes whose
+ * `folderId` matches the folder's id slot into `notes`. Sorted siblings
+ * are in stable order: folders by `sortOrder` then `name`; notes by the
+ * server's already-applied recency order (we just preserve it).
+ */
+interface TreeFolder {
+  folder: NoteFolder;
+  subfolders: TreeFolder[];
+  notes: KgNoteListEntry[];
+}
+
+interface Tree {
+  rootFolders: TreeFolder[];
+  rootNotes: KgNoteListEntry[];
+}
+
+function loadExpanded(): Set<number> {
+  try {
+    const raw = localStorage.getItem(EXPANDED_STORAGE_KEY);
+    if (!raw) return new Set();
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set();
+    const ids: number[] = [];
+    for (const v of parsed) {
+      if (typeof v === "number" && Number.isInteger(v)) ids.push(v);
+    }
+    return new Set(ids);
+  } catch {
+    return new Set();
+  }
+}
+
+function saveExpanded(expanded: Set<number>): void {
+  try {
+    localStorage.setItem(EXPANDED_STORAGE_KEY, JSON.stringify([...expanded]));
+  } catch {
+    // ignore — localStorage failures shouldn't break tree toggling
+  }
+}
+
+/**
+ * Assemble the flat folder + note arrays into a nested tree. Folders not
+ * reachable from any root (orphan parent ids — shouldn't happen normally,
+ * but defensive against cascading deletes mid-fetch) are silently dropped.
+ */
+function buildTree(folders: NoteFolder[], notes: KgNoteListEntry[]): Tree {
+  const byParent = new Map<number | null, NoteFolder[]>();
+  for (const f of folders) {
+    const arr = byParent.get(f.parentId);
+    if (arr) arr.push(f);
+    else byParent.set(f.parentId, [f]);
+  }
+  // Stable sort by sortOrder asc, then name asc, for sibling display.
+  for (const arr of byParent.values()) {
+    arr.sort((a, b) => {
+      if (a.sortOrder !== b.sortOrder) return a.sortOrder - b.sortOrder;
+      return a.name.localeCompare(b.name);
+    });
+  }
+
+  const notesByFolder = new Map<number | null, KgNoteListEntry[]>();
+  for (const n of notes) {
+    const arr = notesByFolder.get(n.folderId);
+    if (arr) arr.push(n);
+    else notesByFolder.set(n.folderId, [n]);
+  }
+  // The API already orders notes by recency; we preserve that within each
+  // folder bucket since iteration above is in input order.
+
+  function build(parentId: number | null): TreeFolder[] {
+    const children = byParent.get(parentId) ?? [];
+    return children.map((f) => ({
+      folder: f,
+      subfolders: build(f.id),
+      notes: notesByFolder.get(f.id) ?? [],
+    }));
+  }
+
+  return {
+    rootFolders: build(null),
+    rootNotes: notesByFolder.get(null) ?? [],
+  };
+}
+
+/**
+ * Count notes (recursive) and subfolders (recursive, excluding self) under a
+ * folder. Used by the non-empty-delete prompt copy.
+ */
+function countDescendants(
+  folder: NoteFolder,
+  folders: NoteFolder[],
+  notes: KgNoteListEntry[],
+): { noteCount: number; subfolderCount: number } {
+  const subfolderIds = new Set<number>();
+  function walkFolders(parentId: number) {
+    for (const f of folders) {
+      if (f.parentId === parentId) {
+        subfolderIds.add(f.id);
+        walkFolders(f.id);
+      }
+    }
+  }
+  walkFolders(folder.id);
+
+  let noteCount = 0;
+  for (const n of notes) {
+    if (
+      n.folderId === folder.id ||
+      (n.folderId !== null && subfolderIds.has(n.folderId))
+    ) {
+      noteCount += 1;
+    }
+  }
+  return { noteCount, subfolderCount: subfolderIds.size };
+}
 
 /**
  * Secondary sidebar that slides out to the right of the primary nav when
- * `Notes` is selected. Phase 2 is flat-list-only — folder hierarchy lands
- * in phase 3. Each row is a node-attached note (`KgNoteListEntry`); the
- * display label is the note's own `name` (M6 phase 2 — sourced from
- * `node_notes.name`, decoupled from the underlying node's name).
+ * `Notes` is selected. M6 phase 3: renders a folder tree assembled from the
+ * flat folder + note lists (`api.listFolders` / `api.notes`). Top-level
+ * supports a custom right-click context menu, inline-edit creation /
+ * rename, and a non-empty-delete prompt for folders.
  *
- * The header `+` icon kicks off a VSCode-style inline-create flow: a new
- * row appears at the top of the list with an auto-focused textbox holding
- * the `untitled` placeholder. Enter or blur commits (POST `/api/kg/notes`,
- * mints a `Generic`-typed node + empty note in one transaction); Esc
- * cancels with no API call. On commit, the parent transitions the main
- * panel into split-edit mode for the new note (see `onCreateNote`).
+ * Tree expansion state persists across sessions via `localStorage`. Top-level
+ * folders default to expanded on first load (matching the design log's
+ * "top-level expanded by default; deeper levels collapsed" rule); subsequent
+ * opens honor whatever the user set.
  */
 export function NotesSidebar({
   selectedNoteId,
   onSelectNote,
   onCreateNote,
+  onNoteRenamed,
+  onNoteDeleted,
   onClose,
   refreshKey,
 }: Props) {
   const [notes, setNotes] = useState<KgNoteListEntry[] | null>(null);
+  const [folders, setFolders] = useState<NoteFolder[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Inline-create state. `null` = no row showing; non-null = the textbox is
-  // open with the user's current draft. Submitting empties this and triggers
-  // a list refresh; cancelling just empties this. We deliberately don't
-  // optimistically prepend a fake row to `notes` — the refreshKey-driven
-  // refetch after commit gives us the canonical row without bookkeeping a
-  // local-vs-server divergence.
-  const [draftName, setDraftName] = useState<string | null>(null);
-  const [creating, setCreating] = useState(false);
-  const [createError, setCreateError] = useState<string | null>(null);
+  // Single inline-edit slot. Null means no edit row is open. We track it
+  // separately from the tree data so a refetch doesn't blow away the user's
+  // in-progress draft.
+  const [edit, setEdit] = useState<EditState | null>(null);
+  const [editError, setEditError] = useState<string | null>(null);
+  const [editSubmitting, setEditSubmitting] = useState(false);
+  const [menu, setMenu] = useState<MenuState | null>(null);
+  const [deletePrompt, setDeletePrompt] = useState<DeletePromptState | null>(null);
+  // Expanded folder ids. Loaded once from localStorage on mount; persisted
+  // on every change. Default: empty set, but we seed with all *root* folder
+  // ids the first time we see them so the top level is expanded by default.
+  const [expanded, setExpanded] = useState<Set<number>>(() => loadExpanded());
+  const seededDefaultExpansion = useRef(false);
+
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // Persist expanded state on every change. Cheap (a Set of small numbers
+  // serialized to JSON) and the user's tree shape doesn't churn rapidly.
   useEffect(() => {
-    let cancelled = false;
-    setError(null);
-    api
-      .notes()
-      .then((res) => {
-        if (!cancelled) setNotes(res);
-      })
-      .catch((err) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [refreshKey]);
+    saveExpanded(expanded);
+  }, [expanded]);
 
-  // Auto-focus the inline-create input on open. Effect runs every time the
-  // draft transitions from null → non-null (the open trigger); we then
-  // select-all the placeholder so the user's first keystroke replaces it.
+  // Combined load — folders + notes in parallel. We refetch on `refreshKey`
+  // (parent signal: chat finished, note edited, etc.) and also locally after
+  // any folder/note CRUD op via the `reload` callback below.
+  const loadAll = useCallback(async () => {
+    setError(null);
+    try {
+      const [foldersRes, notesRes] = await Promise.all([api.listFolders(), api.notes()]);
+      setFolders(foldersRes);
+      setNotes(notesRes);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }, []);
+
   useEffect(() => {
-    if (draftName === null) return;
+    void loadAll();
+  }, [loadAll, refreshKey]);
+
+  // First-load default expansion — seed with all current root folder ids,
+  // but only if localStorage didn't already persist a choice. Once the user
+  // collapses or expands anything we trust their state.
+  useEffect(() => {
+    if (folders === null) return;
+    if (seededDefaultExpansion.current) return;
+    seededDefaultExpansion.current = true;
+    try {
+      const stored = localStorage.getItem(EXPANDED_STORAGE_KEY);
+      if (stored !== null) return; // user has a saved state already
+    } catch {
+      // ignore
+    }
+    const rootIds = folders.filter((f) => f.parentId === null).map((f) => f.id);
+    if (rootIds.length === 0) return;
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      for (const id of rootIds) next.add(id);
+      return next;
+    });
+  }, [folders]);
+
+  // Stable identity of the current edit slot — `kind` plus the relevant
+  // target id. Lets the auto-focus effect fire only when the *slot itself*
+  // changes (open / close / switch), not on every keystroke. Without this,
+  // the effect would re-run on each `setEdit({...prev, draft})` and call
+  // `el.select()` after every char, which selects-all and makes typing
+  // reset on the next keystroke.
+  const editIdentity = edit
+    ? edit.kind === "rename-folder"
+      ? `rename-folder:${edit.folderId}`
+      : edit.kind === "rename-note"
+        ? `rename-note:${edit.nodeId}`
+        : `${edit.kind}:${edit.parentId ?? "root"}`
+    : null;
+
+  // Auto-focus the inline-edit input when an edit slot opens. Effect runs on
+  // every transition into a different non-null edit identity; we select-all
+  // so the user's first keystroke replaces the placeholder/current name.
+  useEffect(() => {
+    if (editIdentity === null) return;
     const el = inputRef.current;
     if (!el) return;
     el.focus();
     el.select();
-  }, [draftName]);
+  }, [editIdentity]);
 
-  function handleStartCreate() {
-    if (creating) return;
-    setCreateError(null);
-    setDraftName(UNTITLED_PLACEHOLDER);
+  // Close the context menu on Esc, scroll, resize, or any click that isn't
+  // on the menu itself. Mirrors how OS-level context menus behave.
+  useEffect(() => {
+    if (menu === null) return;
+    function close() {
+      setMenu(null);
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") close();
+    }
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [menu]);
+
+  const tree = useMemo(() => {
+    if (folders === null || notes === null) return null;
+    return buildTree(folders, notes);
+  }, [folders, notes]);
+
+  function toggleExpanded(id: number) {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   }
 
-  function handleCancelCreate() {
-    setDraftName(null);
-    setCreateError(null);
+  // ─── Inline-edit lifecycle ────────────────────────────────────────────
+
+  function startEdit(next: EditState) {
+    if (editSubmitting) return;
+    setEditError(null);
+    setEdit(next);
+    // If we're creating inside a folder, make sure that folder is expanded
+    // so the new row is visible.
+    if (
+      (next.kind === "create-folder" || next.kind === "create-note") &&
+      next.parentId !== null
+    ) {
+      setExpanded((prev) => {
+        if (prev.has(next.parentId as number)) return prev;
+        const out = new Set(prev);
+        out.add(next.parentId as number);
+        return out;
+      });
+    }
   }
 
-  async function handleCommitCreate() {
-    if (creating) return;
-    const trimmed = (draftName ?? "").trim();
-    // Empty-or-placeholder commit cancels. The placeholder is what the input
-    // pre-populates with, and the user can blur without typing — treat that
-    // as "I changed my mind" rather than spawning an `untitled` node.
+  function cancelEdit() {
+    setEdit(null);
+    setEditError(null);
+  }
+
+  async function commitEdit() {
+    if (edit === null || editSubmitting) return;
+    const trimmed = edit.draft.trim();
+
+    // Empty / placeholder commit → cancel without API call. Matches the
+    // existing flat-list behaviour from m6p2 (blur on an unchanged
+    // `untitled` placeholder shouldn't spawn an `untitled` node).
     if (!trimmed || trimmed === UNTITLED_PLACEHOLDER) {
-      handleCancelCreate();
+      cancelEdit();
       return;
     }
-    setCreating(true);
-    setCreateError(null);
+
+    // Rename no-op → just close, no PATCH.
+    if (edit.kind === "rename-folder") {
+      const current = folders?.find((f) => f.id === edit.folderId);
+      if (current && current.name === trimmed) {
+        cancelEdit();
+        return;
+      }
+    }
+    if (edit.kind === "rename-note") {
+      const current = notes?.find((n) => n.nodeId === edit.nodeId);
+      if (current && current.name === trimmed) {
+        cancelEdit();
+        return;
+      }
+    }
+
+    setEditSubmitting(true);
+    setEditError(null);
     try {
-      const res = await api.createNote({ name: trimmed });
-      setDraftName(null);
-      onCreateNote(res.nodeId, res.name);
+      switch (edit.kind) {
+        case "create-folder": {
+          await api.createFolder({ name: trimmed, parentId: edit.parentId });
+          setEdit(null);
+          await loadAll();
+          break;
+        }
+        case "create-note": {
+          const res = await api.createNote({
+            name: trimmed,
+            folderId: edit.parentId,
+          });
+          setEdit(null);
+          // Same downstream as the header `+`-button flow: parent bumps
+          // refreshKey + flips into split-edit. We refetch locally too so
+          // the new row shows immediately rather than waiting on the
+          // refreshKey round-trip from the parent (which it does fire,
+          // but ordering between the two listeners is racy).
+          await loadAll();
+          onCreateNote(res.nodeId, res.name);
+          break;
+        }
+        case "rename-folder": {
+          await api.patchFolder(edit.folderId, { name: trimmed });
+          setEdit(null);
+          await loadAll();
+          break;
+        }
+        case "rename-note": {
+          await api.renameNote(edit.nodeId, trimmed);
+          setEdit(null);
+          onNoteRenamed(edit.nodeId, trimmed);
+          await loadAll();
+          break;
+        }
+      }
     } catch (err) {
-      setCreateError(err instanceof Error ? err.message : String(err));
+      // 409 unique-constraint failures land here. Surface verbatim so the
+      // user sees "name already taken" or whatever the server returned.
+      setEditError(err instanceof Error ? err.message : String(err));
     } finally {
-      setCreating(false);
+      setEditSubmitting(false);
     }
   }
+
+  // ─── Right-click menu actions ─────────────────────────────────────────
+
+  function onContextMenu(e: React.MouseEvent, target: MenuTarget) {
+    e.preventDefault();
+    e.stopPropagation();
+    setMenu({ x: e.clientX, y: e.clientY, target });
+  }
+
+  function closeMenu() {
+    setMenu(null);
+  }
+
+  function handleMenuAction(action: string) {
+    if (menu === null) return;
+    const target = menu.target;
+    closeMenu();
+
+    if (target.kind === "folder") {
+      const f = target.folder;
+      if (action === "add-subfolder") {
+        startEdit({ kind: "create-folder", parentId: f.id, draft: UNTITLED_PLACEHOLDER });
+      } else if (action === "add-note") {
+        startEdit({ kind: "create-note", parentId: f.id, draft: UNTITLED_PLACEHOLDER });
+      } else if (action === "rename") {
+        startEdit({ kind: "rename-folder", folderId: f.id, draft: f.name });
+      } else if (action === "delete") {
+        void deleteFolderFlow(f);
+      }
+    } else if (target.kind === "note") {
+      const n = target.note;
+      if (action === "rename") {
+        startEdit({ kind: "rename-note", nodeId: n.nodeId, draft: n.name });
+      } else if (action === "delete") {
+        void deleteNoteFlow(n);
+      }
+    } else {
+      if (action === "add-folder") {
+        startEdit({ kind: "create-folder", parentId: null, draft: UNTITLED_PLACEHOLDER });
+      } else if (action === "add-note") {
+        startEdit({ kind: "create-note", parentId: null, draft: UNTITLED_PLACEHOLDER });
+      }
+    }
+  }
+
+  async function deleteNoteFlow(note: KgNoteListEntry) {
+    // Match the existing `forget`-style posture: no confirmation, the
+    // delete is one click on the menu away. The user's selectedNote may
+    // be this note — parent clears it via onNoteDeleted.
+    try {
+      await api.deleteNote(note.nodeId);
+      onNoteDeleted(note.nodeId);
+      await loadAll();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function deleteFolderFlow(folder: NoteFolder) {
+    if (!folders || !notes) return;
+    const counts = countDescendants(folder, folders, notes);
+    if (counts.noteCount === 0 && counts.subfolderCount === 0) {
+      // Empty folder — just delete (default `unfile` mode is a no-op when
+      // there's nothing to unfile; the folder row goes away).
+      try {
+        await api.deleteFolder(folder.id, "unfile");
+        await loadAll();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+      return;
+    }
+    setDeletePrompt({
+      folder,
+      noteCount: counts.noteCount,
+      subfolderCount: counts.subfolderCount,
+    });
+  }
+
+  async function performFolderDelete(mode: "unfile" | "cascade") {
+    if (deletePrompt === null) return;
+    const folder = deletePrompt.folder;
+    setDeletePrompt(null);
+    try {
+      const result = await api.deleteFolder(folder.id, mode);
+      // In cascade mode, every contained note's underlying node was just
+      // deleted server-side. If `selectedNote` was one of them, clear it.
+      // We don't have a per-note id list back from the server — just hand
+      // the parent the easy case (was the active note inside this tree?)
+      // by checking before we refetch. The user's selectedNoteId is held
+      // by the parent; we approximate "selected note got nuked" by asking
+      // whether the active note was inside this folder's subtree.
+      if (mode === "cascade" && notes && selectedNoteId !== null) {
+        const subfolderIds = new Set<number>();
+        function walk(parentId: number) {
+          if (!folders) return;
+          for (const f of folders) {
+            if (f.parentId === parentId) {
+              subfolderIds.add(f.id);
+              walk(f.id);
+            }
+          }
+        }
+        walk(folder.id);
+        const wasInSubtree = notes.some(
+          (n) =>
+            n.nodeId === selectedNoteId &&
+            (n.folderId === folder.id ||
+              (n.folderId !== null && subfolderIds.has(n.folderId))),
+        );
+        if (wasInSubtree) onNoteDeleted(selectedNoteId);
+      }
+      void result; // counts are surfaced indirectly through the refetch
+      await loadAll();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  // ─── Header `+` (matches m6p2 — adds a root-level note) ───────────────
+
+  function handleHeaderPlus() {
+    startEdit({ kind: "create-note", parentId: null, draft: UNTITLED_PLACEHOLDER });
+  }
+
+  // ─── Tree rendering ───────────────────────────────────────────────────
+
+  const empty =
+    tree !== null &&
+    tree.rootFolders.length === 0 &&
+    tree.rootNotes.length === 0 &&
+    edit === null;
 
   return (
     <aside className="hidden lg:flex w-64 shrink-0 flex-col border-r border-zinc-900/80 bg-zinc-950 animate-fade-in">
@@ -138,10 +589,10 @@ export function NotesSidebar({
         <span className="text-[11px] uppercase tracking-wider text-zinc-500">notes</span>
         <button
           type="button"
-          onClick={handleStartCreate}
+          onClick={handleHeaderPlus}
           aria-label="new note"
           title="New note"
-          disabled={creating || draftName !== null}
+          disabled={editSubmitting || edit !== null}
           className="ml-auto flex h-6 w-6 items-center justify-center rounded text-zinc-500 transition hover:bg-zinc-900 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-zinc-500"
         >
           <Plus className="h-3.5 w-3.5" />
@@ -157,78 +608,565 @@ export function NotesSidebar({
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-2 py-2">
-        {createError && (
-          <p className="mb-2 px-2 text-xs text-red-400">create failed: {createError}</p>
-        )}
-        {draftName !== null && (
-          // Inline-create row — sits at the top of the list while the
-          // textbox is open. Mirrors the visual shape of a real note row so
-          // the user reads it as "this is the new entry I'm naming."
-          <div className="mb-0.5 flex w-full items-center gap-2 rounded-md bg-zinc-900 px-2 py-1.5">
-            <FileText className="h-3.5 w-3.5 shrink-0 opacity-60" />
-            <input
-              ref={inputRef}
-              type="text"
-              value={draftName}
-              onChange={(e) => setDraftName(e.target.value)}
-              onBlur={() => {
-                // Commit on blur — same as Enter. Cancel-on-Esc fires below
-                // and clears `draftName` before blur lands, so this branch
-                // doesn't double-commit on Esc.
-                if (draftName !== null) void handleCommitCreate();
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  void handleCommitCreate();
-                } else if (e.key === "Escape") {
-                  e.preventDefault();
-                  handleCancelCreate();
-                }
-              }}
-              disabled={creating}
-              className="min-w-0 flex-1 bg-transparent text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none disabled:opacity-60"
-              spellCheck={false}
-              aria-label="new note name"
-            />
-          </div>
+      <div
+        className="flex-1 overflow-y-auto px-2 py-2"
+        // Right-click on empty space in the scroll area opens the
+        // empty-context menu (Add folder / Add note at root). Sub-rows
+        // stop propagation so their own onContextMenu wins.
+        onContextMenu={(e) => onContextMenu(e, { kind: "empty" })}
+      >
+        {editError && (
+          <p className="mb-2 px-2 text-xs text-red-400">action failed: {editError}</p>
         )}
 
         {error ? (
           <p className="px-2 text-xs text-red-400">{error}</p>
-        ) : !notes ? (
+        ) : tree === null ? (
           <p className="px-2 text-xs text-zinc-600">loading…</p>
-        ) : notes.length === 0 && draftName === null ? (
+        ) : empty ? (
           <p className="px-2 text-xs text-zinc-600">
             no notes yet — click the <span className="text-zinc-300">+</span> to create
             one.
           </p>
         ) : (
           <ul className="flex flex-col gap-0.5">
-            {notes.map((n) => {
-              const active = n.nodeId === selectedNoteId;
-              return (
-                <li key={n.nodeId}>
-                  <button
-                    type="button"
-                    onClick={() => onSelectNote(n.nodeId, n.name)}
-                    className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition ${
-                      active
-                        ? "bg-zinc-900 text-zinc-100"
-                        : "text-zinc-400 hover:bg-zinc-900/60 hover:text-zinc-200"
-                    }`}
-                  >
-                    <FileText className="h-3.5 w-3.5 shrink-0 opacity-60" />
-                    <span className="flex-1 truncate">{n.name}</span>
-                    <span className="shrink-0 text-[10px] text-zinc-600">{n.type}</span>
-                  </button>
+            {tree.rootFolders.map((tf) => (
+              <FolderRow
+                key={`f-${tf.folder.id}`}
+                tf={tf}
+                depth={0}
+                expanded={expanded}
+                toggleExpanded={toggleExpanded}
+                edit={edit}
+                editSubmitting={editSubmitting}
+                inputRef={inputRef}
+                onEditChange={(v) =>
+                  setEdit((prev) => (prev ? { ...prev, draft: v } : prev))
+                }
+                onEditCommit={commitEdit}
+                onEditCancel={cancelEdit}
+                onContextMenu={onContextMenu}
+                selectedNoteId={selectedNoteId}
+                onSelectNote={onSelectNote}
+              />
+            ))}
+
+            {/* Root-level inline create row (folder or note at parent=null) */}
+            {edit !== null &&
+              (edit.kind === "create-folder" || edit.kind === "create-note") &&
+              edit.parentId === null && (
+                <li>
+                  <InlineEditRow
+                    icon={edit.kind === "create-folder" ? "folder" : "note"}
+                    depth={0}
+                    value={edit.draft}
+                    inputRef={inputRef}
+                    submitting={editSubmitting}
+                    onChange={(v) =>
+                      setEdit((prev) => (prev ? { ...prev, draft: v } : prev))
+                    }
+                    onCommit={commitEdit}
+                    onCancel={cancelEdit}
+                    ariaLabel={
+                      edit.kind === "create-folder" ? "new folder name" : "new note name"
+                    }
+                  />
                 </li>
+              )}
+
+            {tree.rootNotes.map((n) => {
+              const isRenaming = edit?.kind === "rename-note" && edit.nodeId === n.nodeId;
+              return (
+                <NoteRow
+                  key={`n-${n.nodeId}`}
+                  note={n}
+                  depth={0}
+                  active={n.nodeId === selectedNoteId}
+                  isRenaming={isRenaming}
+                  edit={isRenaming ? edit : null}
+                  inputRef={isRenaming ? inputRef : null}
+                  editSubmitting={editSubmitting}
+                  onEditChange={(v) =>
+                    setEdit((prev) => (prev ? { ...prev, draft: v } : prev))
+                  }
+                  onEditCommit={commitEdit}
+                  onEditCancel={cancelEdit}
+                  onSelectNote={onSelectNote}
+                  onContextMenu={onContextMenu}
+                />
               );
             })}
           </ul>
         )}
       </div>
+
+      {menu !== null && (
+        <ContextMenu menu={menu} onAction={handleMenuAction} onDismiss={closeMenu} />
+      )}
+
+      {deletePrompt !== null && (
+        <DeleteFolderPrompt
+          state={deletePrompt}
+          onMoveToUnfiled={() => void performFolderDelete("unfile")}
+          onCascade={() => void performFolderDelete("cascade")}
+          onCancel={() => setDeletePrompt(null)}
+        />
+      )}
     </aside>
+  );
+}
+
+// ─── Sub-components ─────────────────────────────────────────────────────
+
+interface FolderRowProps {
+  tf: TreeFolder;
+  depth: number;
+  expanded: Set<number>;
+  toggleExpanded: (id: number) => void;
+  edit: EditState | null;
+  editSubmitting: boolean;
+  inputRef: React.RefObject<HTMLInputElement>;
+  onEditChange: (v: string) => void;
+  onEditCommit: () => void;
+  onEditCancel: () => void;
+  onContextMenu: (e: React.MouseEvent, target: MenuTarget) => void;
+  selectedNoteId: string | null;
+  onSelectNote: (nodeId: string, name: string) => void;
+}
+
+/**
+ * Recursive folder + contents renderer. We render in this order so the
+ * tree shape mirrors VSCode's explorer:
+ *
+ * 1. The folder header (chevron + folder icon + name).
+ * 2. Inline-create row, if the user is currently creating a child of
+ *    this folder (and we're expanded).
+ * 3. Subfolders.
+ * 4. Notes inside this folder.
+ */
+function FolderRow({
+  tf,
+  depth,
+  expanded,
+  toggleExpanded,
+  edit,
+  editSubmitting,
+  inputRef,
+  onEditChange,
+  onEditCommit,
+  onEditCancel,
+  onContextMenu,
+  selectedNoteId,
+  onSelectNote,
+}: FolderRowProps) {
+  const isRenaming = edit?.kind === "rename-folder" && edit.folderId === tf.folder.id;
+  const isOpen = expanded.has(tf.folder.id);
+  const padLeft = 8 + depth * 12;
+
+  return (
+    <li>
+      {isRenaming && edit ? (
+        <InlineEditRow
+          icon="folder"
+          depth={depth}
+          value={edit.draft}
+          inputRef={inputRef}
+          submitting={editSubmitting}
+          onChange={onEditChange}
+          onCommit={onEditCommit}
+          onCancel={onEditCancel}
+          ariaLabel="folder name"
+        />
+      ) : (
+        <button
+          type="button"
+          onClick={() => toggleExpanded(tf.folder.id)}
+          onContextMenu={(e) => onContextMenu(e, { kind: "folder", folder: tf.folder })}
+          className="flex w-full items-center gap-1 rounded-md py-1.5 pr-2 text-left text-sm text-zinc-300 transition hover:bg-zinc-900/60 hover:text-zinc-100"
+          style={{ paddingLeft: padLeft }}
+        >
+          {isOpen ? (
+            <ChevronDown className="h-3 w-3 shrink-0 text-zinc-500" />
+          ) : (
+            <ChevronRight className="h-3 w-3 shrink-0 text-zinc-500" />
+          )}
+          {isOpen ? (
+            <FolderOpen className="h-3.5 w-3.5 shrink-0 opacity-70" />
+          ) : (
+            <Folder className="h-3.5 w-3.5 shrink-0 opacity-70" />
+          )}
+          <span className="flex-1 truncate">{tf.folder.name}</span>
+        </button>
+      )}
+
+      {isOpen && (
+        <ul className="flex flex-col gap-0.5">
+          {edit !== null &&
+            (edit.kind === "create-folder" || edit.kind === "create-note") &&
+            edit.parentId === tf.folder.id && (
+              <li>
+                <InlineEditRow
+                  icon={edit.kind === "create-folder" ? "folder" : "note"}
+                  depth={depth + 1}
+                  value={edit.draft}
+                  inputRef={inputRef}
+                  submitting={editSubmitting}
+                  onChange={onEditChange}
+                  onCommit={onEditCommit}
+                  onCancel={onEditCancel}
+                  ariaLabel={
+                    edit.kind === "create-folder" ? "new folder name" : "new note name"
+                  }
+                />
+              </li>
+            )}
+
+          {tf.subfolders.map((sf) => (
+            <FolderRow
+              key={`f-${sf.folder.id}`}
+              tf={sf}
+              depth={depth + 1}
+              expanded={expanded}
+              toggleExpanded={toggleExpanded}
+              edit={edit}
+              editSubmitting={editSubmitting}
+              inputRef={inputRef}
+              onEditChange={onEditChange}
+              onEditCommit={onEditCommit}
+              onEditCancel={onEditCancel}
+              onContextMenu={onContextMenu}
+              selectedNoteId={selectedNoteId}
+              onSelectNote={onSelectNote}
+            />
+          ))}
+
+          {tf.notes.map((n) => {
+            const isNoteRenaming =
+              edit?.kind === "rename-note" && edit.nodeId === n.nodeId;
+            return (
+              <NoteRow
+                key={`n-${n.nodeId}`}
+                note={n}
+                depth={depth + 1}
+                active={n.nodeId === selectedNoteId}
+                isRenaming={isNoteRenaming}
+                edit={isNoteRenaming ? edit : null}
+                inputRef={isNoteRenaming ? inputRef : null}
+                editSubmitting={editSubmitting}
+                onEditChange={onEditChange}
+                onEditCommit={onEditCommit}
+                onEditCancel={onEditCancel}
+                onSelectNote={onSelectNote}
+                onContextMenu={onContextMenu}
+              />
+            );
+          })}
+        </ul>
+      )}
+    </li>
+  );
+}
+
+interface NoteRowProps {
+  note: KgNoteListEntry;
+  depth: number;
+  active: boolean;
+  isRenaming: boolean;
+  edit: EditState | null;
+  inputRef: React.RefObject<HTMLInputElement> | null;
+  editSubmitting: boolean;
+  onEditChange: (v: string) => void;
+  onEditCommit: () => void;
+  onEditCancel: () => void;
+  onSelectNote: (nodeId: string, name: string) => void;
+  onContextMenu: (e: React.MouseEvent, target: MenuTarget) => void;
+}
+
+function NoteRow({
+  note,
+  depth,
+  active,
+  isRenaming,
+  edit,
+  inputRef,
+  editSubmitting,
+  onEditChange,
+  onEditCommit,
+  onEditCancel,
+  onSelectNote,
+  onContextMenu,
+}: NoteRowProps) {
+  if (isRenaming && edit && inputRef) {
+    return (
+      <li>
+        <InlineEditRow
+          icon="note"
+          depth={depth}
+          value={edit.draft}
+          inputRef={inputRef}
+          submitting={editSubmitting}
+          onChange={onEditChange}
+          onCommit={onEditCommit}
+          onCancel={onEditCancel}
+          ariaLabel="note name"
+        />
+      </li>
+    );
+  }
+  const padLeft = 8 + depth * 12;
+  return (
+    <li>
+      <button
+        type="button"
+        onClick={() => onSelectNote(note.nodeId, note.name)}
+        onContextMenu={(e) => onContextMenu(e, { kind: "note", note })}
+        className={`flex w-full items-center gap-2 rounded-md py-1.5 pr-2 text-left text-sm transition ${
+          active
+            ? "bg-zinc-900 text-zinc-100"
+            : "text-zinc-400 hover:bg-zinc-900/60 hover:text-zinc-200"
+        }`}
+        style={{ paddingLeft: padLeft }}
+      >
+        <FileText className="h-3.5 w-3.5 shrink-0 opacity-60" />
+        <span className="flex-1 truncate">{note.name}</span>
+        <span className="shrink-0 text-[10px] text-zinc-600">{note.type}</span>
+      </button>
+    </li>
+  );
+}
+
+interface InlineEditRowProps {
+  icon: "folder" | "note";
+  depth: number;
+  value: string;
+  inputRef: React.RefObject<HTMLInputElement>;
+  submitting: boolean;
+  onChange: (v: string) => void;
+  onCommit: () => void;
+  onCancel: () => void;
+  ariaLabel: string;
+}
+
+/**
+ * The inline edit textbox row. Used for both create and rename flows; the
+ * difference between them lives in the parent commit handler. Enter
+ * commits, Esc cancels, blur commits (matches VSCode's explorer).
+ *
+ * Implementation note: cancel-on-Esc fires before blur lands (we set the
+ * draft to null synchronously inside the keydown handler, and the blur
+ * branch reads the latest `edit` via a closure). To prevent a double-fire
+ * where Esc cancels and then blur tries to commit again, the parent's
+ * commitEdit treats a null edit slot as a no-op.
+ */
+function InlineEditRow({
+  icon,
+  depth,
+  value,
+  inputRef,
+  submitting,
+  onChange,
+  onCommit,
+  onCancel,
+  ariaLabel,
+}: InlineEditRowProps) {
+  const padLeft = 8 + depth * 12;
+  // Escape sets a flag so the blur that follows skips its commit branch.
+  const cancelledRef = useRef(false);
+  return (
+    <div
+      className="mb-0.5 flex w-full items-center gap-2 rounded-md bg-zinc-900 py-1.5 pr-2"
+      style={{ paddingLeft: padLeft }}
+    >
+      {icon === "folder" ? (
+        <Folder className="h-3.5 w-3.5 shrink-0 opacity-70" />
+      ) : (
+        <FileText className="h-3.5 w-3.5 shrink-0 opacity-60" />
+      )}
+      <input
+        ref={inputRef}
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onBlur={() => {
+          if (cancelledRef.current) {
+            cancelledRef.current = false;
+            return;
+          }
+          onCommit();
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            onCommit();
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            cancelledRef.current = true;
+            onCancel();
+          }
+        }}
+        disabled={submitting}
+        className="min-w-0 flex-1 bg-transparent text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none disabled:opacity-60"
+        spellCheck={false}
+        aria-label={ariaLabel}
+      />
+    </div>
+  );
+}
+
+interface ContextMenuProps {
+  menu: MenuState;
+  onAction: (action: string) => void;
+  onDismiss: () => void;
+}
+
+/**
+ * Custom right-click menu. Positioned at the cursor; clamped to stay inside
+ * the viewport. A backdrop captures click-anywhere-to-dismiss without
+ * firing other handlers.
+ */
+function ContextMenu({ menu, onAction, onDismiss }: ContextMenuProps) {
+  // Items depend on what was right-clicked.
+  let items: { label: string; action: string; danger?: boolean }[];
+  if (menu.target.kind === "folder") {
+    items = [
+      { label: "Add subfolder", action: "add-subfolder" },
+      { label: "Add note", action: "add-note" },
+      { label: "Rename", action: "rename" },
+      { label: "Delete", action: "delete", danger: true },
+    ];
+  } else if (menu.target.kind === "note") {
+    items = [
+      { label: "Rename", action: "rename" },
+      { label: "Delete", action: "delete", danger: true },
+    ];
+  } else {
+    items = [
+      { label: "Add folder", action: "add-folder" },
+      { label: "Add note", action: "add-note" },
+    ];
+  }
+
+  // Clamp position so the menu doesn't overflow off the right/bottom edge.
+  // Width/height are estimates good enough for a 2–4 item menu.
+  const ESTIMATED_WIDTH = 180;
+  const ESTIMATED_HEIGHT = items.length * 32 + 8;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const x = Math.min(menu.x, Math.max(0, vw - ESTIMATED_WIDTH - 4));
+  const y = Math.min(menu.y, Math.max(0, vh - ESTIMATED_HEIGHT - 4));
+
+  return (
+    <>
+      {/* Backdrop — full-screen invisible click-trap */}
+      <div
+        className="fixed inset-0 z-50"
+        onClick={onDismiss}
+        onContextMenu={(e) => {
+          // Right-click on the backdrop should also dismiss without
+          // popping the browser's native menu.
+          e.preventDefault();
+          onDismiss();
+        }}
+      />
+      <div
+        role="menu"
+        aria-label="context menu"
+        className="fixed z-50 min-w-[160px] overflow-hidden rounded-md border border-zinc-800 bg-zinc-950 py-1 text-sm shadow-2xl animate-fade-in"
+        style={{ left: x, top: y }}
+      >
+        {items.map((item) => (
+          <button
+            key={item.action}
+            type="button"
+            role="menuitem"
+            onClick={() => onAction(item.action)}
+            className={`block w-full px-3 py-1.5 text-left transition ${
+              item.danger
+                ? "text-red-400 hover:bg-red-500/10 hover:text-red-300"
+                : "text-zinc-200 hover:bg-zinc-900 hover:text-zinc-50"
+            }`}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+    </>
+  );
+}
+
+interface DeleteFolderPromptProps {
+  state: DeletePromptState;
+  onMoveToUnfiled: () => void;
+  onCascade: () => void;
+  onCancel: () => void;
+}
+
+/**
+ * Modal shown when the user deletes a non-empty folder. Three actions:
+ *
+ * - **Move to Unfiled** (default focus) — drops the folder + descendant
+ *   folders, but contained notes stay alive at the unfiled root.
+ * - **Delete folder + contents** — cascade; the underlying nodes for
+ *   every contained note are deleted too.
+ * - **Cancel** — close without doing anything.
+ */
+function DeleteFolderPrompt({
+  state,
+  onMoveToUnfiled,
+  onCascade,
+  onCancel,
+}: DeleteFolderPromptProps) {
+  const moveBtnRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    moveBtnRef.current?.focus();
+  }, []);
+
+  const { folder, noteCount, subfolderCount } = state;
+
+  return (
+    <div
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 backdrop-blur-sm animate-fade-in"
+      role="dialog"
+      aria-modal="true"
+      aria-label="confirm folder delete"
+      onKeyDown={(e) => {
+        if (e.key === "Escape") onCancel();
+      }}
+    >
+      <div className="mx-4 w-full max-w-md rounded-2xl border border-zinc-800 bg-zinc-950 shadow-2xl">
+        <div className="border-b border-zinc-900 px-5 py-3">
+          <h2 className="text-sm font-medium text-zinc-100">Delete folder</h2>
+        </div>
+        <div className="px-5 py-4 text-sm text-zinc-300">
+          Delete folder <span className="font-mono text-zinc-100">{folder.name}</span>? It
+          contains {noteCount} {noteCount === 1 ? "note" : "notes"} and {subfolderCount}{" "}
+          {subfolderCount === 1 ? "subfolder" : "subfolders"}.
+        </div>
+        <div className="flex flex-wrap items-center justify-end gap-2 border-t border-zinc-900 px-5 py-3">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="rounded-md border border-zinc-800 bg-zinc-950 px-3 py-1.5 text-xs text-zinc-300 transition hover:border-zinc-700 hover:bg-zinc-900"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onCascade}
+            className="rounded-md border border-red-900/60 bg-red-950/40 px-3 py-1.5 text-xs text-red-300 transition hover:border-red-800 hover:bg-red-950/60"
+          >
+            Delete folder + contents
+          </button>
+          <button
+            ref={moveBtnRef}
+            type="button"
+            onClick={onMoveToUnfiled}
+            className="rounded-md border border-zinc-700 bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-900 transition hover:bg-white"
+          >
+            Move to Unfiled
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
