@@ -625,20 +625,59 @@ app.put("/api/kg/node/:id/note", async (c) => {
   return c.json({ note });
 });
 
-// Rename-only endpoint (M6 phase 2). Phase 3 wires this up to the right-click
-// `Rename` action in the secondary sidebar; phase 2 ships the route so the
-// schema + API surface are complete in one shot. 404 when the note row
-// doesn't exist — renaming a non-existent note is meaningless (no body to
-// attach the label to).
+// Rename-only endpoint (M6 phase 2) extended in phase 3 to also handle
+// move-to-folder. Body shape: `{name?: string, folderId?: number | null}`.
+// At least one field must be present; both can be supplied in one PATCH
+// (e.g. drop a renamed note into a different folder in a single round-trip).
+//
+// 404 when the note row doesn't exist — renaming/moving a non-existent
+// note is meaningless. FK violations on `folderId` (unknown folder id)
+// surface as a 400.
 app.patch("/api/kg/node/:id/note", async (c) => {
   const id = c.req.param("id");
   if (!kg.getNode(id)) return c.json({ error: "Node not found" }, 404);
-  const body = await c.req.json<{ name?: unknown }>().catch(() => null);
-  if (!body || typeof body.name !== "string" || body.name.trim().length === 0) {
-    return c.json({ error: "name (non-empty string) required" }, 400);
+  const body = await c.req
+    .json<{ name?: unknown; folderId?: unknown }>()
+    .catch(() => null);
+  if (!body) return c.json({ error: "invalid JSON" }, 400);
+
+  let name: string | undefined;
+  if (body.name !== undefined) {
+    if (typeof body.name !== "string" || body.name.trim().length === 0) {
+      return c.json({ error: "name must be a non-empty string when provided" }, 400);
+    }
+    name = body.name;
   }
-  const note = kg.renameNote(id, body.name);
-  if (!note) return c.json({ error: "Note not found" }, 404);
+
+  let folderId: number | null | undefined;
+  if (body.folderId !== undefined) {
+    if (body.folderId === null) {
+      folderId = null;
+    } else if (typeof body.folderId === "number" && Number.isInteger(body.folderId)) {
+      folderId = body.folderId;
+    } else {
+      return c.json({ error: "folderId must be an integer or null when provided" }, 400);
+    }
+  }
+
+  if (name === undefined && folderId === undefined) {
+    return c.json({ error: "at least one of {name, folderId} required" }, 400);
+  }
+
+  let note: kg.NodeNote | null = null;
+  try {
+    if (name !== undefined) {
+      note = kg.renameNote(id, name);
+      if (!note) return c.json({ error: "Note not found" }, 404);
+    }
+    if (folderId !== undefined) {
+      note = kg.moveNote(id, folderId);
+      if (!note) return c.json({ error: "Note not found" }, 404);
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Unknown error";
+    return c.json({ error: `note update failed: ${msg}` }, 400);
+  }
   return c.json({ note });
 });
 
@@ -646,6 +685,126 @@ app.delete("/api/kg/node/:id/note", (c) => {
   const id = c.req.param("id");
   if (!kg.getNode(id)) return c.json({ error: "Node not found" }, 404);
   const result = kg.deleteNote(id);
+  return c.json(result);
+});
+
+// ───────── Folders (M6 phase 3) ─────────
+//
+// Pure UI organization layer over notes — no edges, no embeddings, no
+// provenance, opaque to the agent. Tree expansion state persists per-user
+// in localStorage on the client; no server table for that.
+//
+// Wire shape:
+// - GET    /api/kg/folders              — flat list (client builds the tree)
+// - POST   /api/kg/folders              — { name, parentId? } → folder
+// - PATCH  /api/kg/folders/:id          — { name?, parentId? } (rename / move)
+// - DELETE /api/kg/folders/:id?mode=…   — mode in { unfile (default), cascade }
+
+app.get("/api/kg/folders", (c) => {
+  return c.json(kg.listFolders());
+});
+
+app.post("/api/kg/folders", async (c) => {
+  const body = await c.req
+    .json<{ name?: unknown; parentId?: unknown; sortOrder?: unknown }>()
+    .catch(() => null);
+  if (!body) return c.json({ error: "invalid JSON" }, 400);
+
+  const name = typeof body.name === "string" ? body.name.trim() : "";
+  if (!name) {
+    return c.json({ error: "name (non-empty string) required" }, 400);
+  }
+
+  let parentId: number | null = null;
+  if (body.parentId !== undefined && body.parentId !== null) {
+    if (typeof body.parentId !== "number" || !Number.isInteger(body.parentId)) {
+      return c.json({ error: "parentId must be an integer or null when provided" }, 400);
+    }
+    parentId = body.parentId;
+  }
+
+  let sortOrder: number | undefined;
+  if (body.sortOrder !== undefined) {
+    if (typeof body.sortOrder !== "number" || !Number.isInteger(body.sortOrder)) {
+      return c.json({ error: "sortOrder must be an integer when provided" }, 400);
+    }
+    sortOrder = body.sortOrder;
+  }
+
+  let folder: kg.NoteFolder;
+  try {
+    folder = kg.createFolder({ name, parentId, sortOrder });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Unknown error";
+    // SQLite UNIQUE violations come through as `SQLITE_CONSTRAINT_UNIQUE`
+    // with message `UNIQUE constraint failed: …`. Treat as 409 so the
+    // client can show a friendly "name already taken" toast.
+    const status = msg.includes("UNIQUE constraint failed") ? 409 : 400;
+    return c.json({ error: `folder create failed: ${msg}` }, status);
+  }
+  return c.json(folder);
+});
+
+app.patch("/api/kg/folders/:id", async (c) => {
+  const idParam = c.req.param("id");
+  const id = Number(idParam);
+  if (!Number.isInteger(id)) return c.json({ error: "invalid folder id" }, 400);
+  const body = await c.req
+    .json<{ name?: unknown; parentId?: unknown }>()
+    .catch(() => null);
+  if (!body) return c.json({ error: "invalid JSON" }, 400);
+
+  let name: string | undefined;
+  if (body.name !== undefined) {
+    if (typeof body.name !== "string" || body.name.trim().length === 0) {
+      return c.json({ error: "name must be a non-empty string when provided" }, 400);
+    }
+    name = body.name;
+  }
+
+  let parentId: number | null | undefined;
+  if (body.parentId !== undefined) {
+    if (body.parentId === null) {
+      parentId = null;
+    } else if (typeof body.parentId === "number" && Number.isInteger(body.parentId)) {
+      parentId = body.parentId;
+    } else {
+      return c.json({ error: "parentId must be an integer or null when provided" }, 400);
+    }
+  }
+
+  if (name === undefined && parentId === undefined) {
+    return c.json({ error: "at least one of {name, parentId} required" }, 400);
+  }
+
+  let folder: kg.NoteFolder | null = null;
+  try {
+    if (name !== undefined) {
+      folder = kg.renameFolder(id, name);
+      if (!folder) return c.json({ error: "Folder not found" }, 404);
+    }
+    if (parentId !== undefined) {
+      folder = kg.moveFolder(id, parentId);
+      if (!folder) return c.json({ error: "Folder not found" }, 404);
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Unknown error";
+    const status = msg.includes("UNIQUE constraint failed") ? 409 : 400;
+    return c.json({ error: `folder update failed: ${msg}` }, status);
+  }
+  return c.json(folder);
+});
+
+app.delete("/api/kg/folders/:id", (c) => {
+  const idParam = c.req.param("id");
+  const id = Number(idParam);
+  if (!Number.isInteger(id)) return c.json({ error: "invalid folder id" }, 400);
+  const modeParam = c.req.query("mode") ?? "unfile";
+  if (modeParam !== "unfile" && modeParam !== "cascade") {
+    return c.json({ error: "mode must be 'unfile' or 'cascade'" }, 400);
+  }
+  const result = kg.deleteFolder(id, modeParam);
+  if (!result.deleted) return c.json({ error: "Folder not found" }, 404);
   return c.json(result);
 });
 
@@ -658,12 +817,16 @@ app.delete("/api/kg/node/:id/note", (c) => {
 // display label), not the underlying node's name. The two were aliased by
 // the seed at first dev startup but drift independently as the user renames
 // notes.
+//
+// M6 phase 3: `folderId` is the (nullable) parent folder; the client uses
+// it to slot the note into the tree. NULL = unfiled root.
 const NOTES_PREVIEW_CHARS = 200;
 app.get("/api/kg/notes", (c) => {
   const rows = db
     .prepare(
       `SELECT n.id as nodeId, nn.name as name, n.type as type,
-              nn.body as body, nn.updated_at as updatedAt
+              nn.body as body, nn.updated_at as updatedAt,
+              nn.folder_id as folderId
          FROM node_notes nn
          JOIN nodes n ON n.id = nn.node_id
         ORDER BY nn.updated_at DESC`,
@@ -674,6 +837,7 @@ app.get("/api/kg/notes", (c) => {
     type: string;
     body: string;
     updatedAt: string;
+    folderId: number | null;
   }[];
   const entries = rows.map((r) => {
     const collapsed = r.body.replace(/\s+/g, " ").trim();
@@ -687,6 +851,7 @@ app.get("/api/kg/notes", (c) => {
       type: r.type,
       preview,
       updatedAt: r.updatedAt,
+      folderId: r.folderId,
     };
   });
   return c.json(entries);
@@ -699,9 +864,9 @@ app.get("/api/kg/notes", (c) => {
 // so the frontend can flip straight into split-edit mode without a follow-up
 // GET.
 //
-// `folderId` is currently rejected when present — folders land phase 3. Keeping
-// the field in the wire shape now means phase 3 only flips the validation
-// rather than redesigning the request body.
+// M6 phase 3: `folderId` (integer | null) is now honored — when provided, the
+// new note is filed into that folder atomically. Invalid folder ids surface
+// as a 400 with the SQLite FK error.
 //
 // Embeddings happen in the background (fire-and-forget), same posture as
 // `record_user_fact` — the user's click-to-row-commit latency doesn't wait on
@@ -734,14 +899,22 @@ app.post("/api/kg/notes", async (c) => {
     noteBody = body.body;
   }
 
-  // Phase 3 will add folder support; for now the field exists in the wire
-  // shape but must be null/absent. Reject anything else so a stale frontend
-  // doesn't silently lose a folder assignment.
+  let folderId: number | null = null;
   if (body.folderId !== undefined && body.folderId !== null) {
-    return c.json({ error: "folderId not supported until phase 3" }, 400);
+    if (typeof body.folderId !== "number" || !Number.isInteger(body.folderId)) {
+      return c.json({ error: "folderId must be an integer or null when provided" }, 400);
+    }
+    folderId = body.folderId;
   }
 
-  const { node, note } = kg.createNoteWithNode({ name, type, body: noteBody });
+  let result: { node: kg.Node; note: kg.NodeNote };
+  try {
+    result = kg.createNoteWithNode({ name, type, body: noteBody, folderId });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Unknown error";
+    return c.json({ error: `note create failed: ${msg}` }, 400);
+  }
+  const { node, note } = result;
   kg.recordProvenance({ factId: node.id, factKind: "node", source: "user_statement" });
 
   embedNodes([node]).catch((err) =>
@@ -753,6 +926,7 @@ app.post("/api/kg/notes", async (c) => {
     name: note.name,
     body: note.body,
     updatedAt: note.updatedAt,
+    folderId: note.folderId,
   });
 });
 

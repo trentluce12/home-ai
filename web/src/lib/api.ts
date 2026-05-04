@@ -105,6 +105,39 @@ export interface NodeNote {
   name: string;
   body: string;
   updatedAt: string;
+  /**
+   * M6 phase 3: optional parent folder. `null` when the note lives at the
+   * unfiled root. Folders are pure UI organization — the server never lets
+   * the agent see this field.
+   */
+  folderId: number | null;
+}
+
+/**
+ * One folder row from `GET /api/kg/folders`. The server returns a flat list;
+ * the client assembles it into a tree. `parentId === null` marks a root
+ * folder. Folder names are unique per-parent (root-level uniqueness is
+ * enforced by a partial index on the server side; collisions surface as
+ * 409s from the create/rename endpoints).
+ */
+export interface NoteFolder {
+  id: number;
+  name: string;
+  parentId: number | null;
+  sortOrder: number;
+  createdAt: number;
+}
+
+/**
+ * Result shape of `DELETE /api/kg/folders/:id?mode=…`. Counts mirror what
+ * happened: `foldersRemoved` includes the root folder plus every cascaded
+ * descendant; `notesAffected` is the number of notes that were either
+ * un-filed (mode=unfile) or had their underlying nodes deleted (mode=cascade).
+ */
+export interface DeleteFolderResult {
+  deleted: true;
+  foldersRemoved: number;
+  notesAffected: number;
 }
 
 /**
@@ -116,6 +149,9 @@ export interface NodeNote {
  * M6 phase 2: `name` is the note's own renamable label, sourced from
  * `node_notes.name` (not the underlying node's name). `type` continues to
  * mirror the node's type — notes don't have their own type.
+ *
+ * M6 phase 3: `folderId` slots the note into the folder tree. `null` means
+ * the note is at the unfiled root.
  */
 export interface KgNoteListEntry {
   nodeId: string;
@@ -123,6 +159,7 @@ export interface KgNoteListEntry {
   type: string;
   preview: string;
   updatedAt: string;
+  folderId: number | null;
 }
 
 /**
@@ -259,22 +296,26 @@ export const api = {
    *
    * `type` defaults to `Generic` when omitted (the catch-all for unclassified
    * notes — see the M6 phase 2 design log entry). `body` defaults to empty.
-   * `folderId` is reserved for phase 3; pass `null` (or omit) for now.
+   * `folderId` (M6 phase 3) optionally files the new note into a folder; pass
+   * `null` or omit to leave it at the unfiled root.
    */
   createNote: (input: {
     name: string;
     type?: string;
     body?: string;
-    folderId?: string | null;
+    folderId?: number | null;
   }) =>
-    jsonFetch<{ nodeId: string; name: string; body: string; updatedAt: string }>(
-      `/api/kg/notes`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(input),
-      },
-    ),
+    jsonFetch<{
+      nodeId: string;
+      name: string;
+      body: string;
+      updatedAt: string;
+      folderId: number | null;
+    }>(`/api/kg/notes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    }),
   getNote: (id: string) =>
     jsonFetch<{ note: NodeNote | null }>(`/api/kg/node/${id}/note`),
   setNote: (id: string, body: string, name?: string) =>
@@ -296,8 +337,58 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name }),
     }),
+  /**
+   * Move a note into / out of a folder (M6 phase 3). `folderId` is the
+   * target folder's id, or `null` to un-file the note (back to the root).
+   * Wired to drag-and-drop and the right-click move action; round-trips
+   * through the same PATCH endpoint as rename so the wire shape stays
+   * coherent (`{ name?, folderId? }`).
+   */
+  moveNote: (id: string, folderId: number | null) =>
+    jsonFetch<{ note: NodeNote }>(`/api/kg/node/${id}/note`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ folderId }),
+    }),
   deleteNote: (id: string) =>
     jsonFetch<{ deleted: boolean }>(`/api/kg/node/${id}/note`, {
+      method: "DELETE",
+    }),
+  /**
+   * List every folder. Server returns a flat array; the client assembles
+   * the tree from `parentId` pointers. Tree-expansion state lives in
+   * localStorage (no server-side state for it).
+   */
+  listFolders: () => jsonFetch<NoteFolder[]>("/api/kg/folders"),
+  /**
+   * Create a folder. `parentId === null` (or omitted) creates a root folder.
+   * 409 on duplicate name within the same parent.
+   */
+  createFolder: (input: { name: string; parentId?: number | null }) =>
+    jsonFetch<NoteFolder>("/api/kg/folders", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    }),
+  /**
+   * Rename / move a folder in one round-trip. At least one of `name` or
+   * `parentId` must be supplied. 409 on rename collision; 400 on a
+   * cycle-creating move.
+   */
+  patchFolder: (id: number, input: { name?: string; parentId?: number | null }) =>
+    jsonFetch<NoteFolder>(`/api/kg/folders/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    }),
+  /**
+   * Delete a folder. `mode: "unfile"` (default) drops the folder + all
+   * descendant folders but un-files contained notes (folder_id → NULL).
+   * `mode: "cascade"` also deletes the underlying nodes for every contained
+   * note — irreversible, so it's gated by the UI's non-empty-delete prompt.
+   */
+  deleteFolder: (id: number, mode: "unfile" | "cascade" = "unfile") =>
+    jsonFetch<DeleteFolderResult>(`/api/kg/folders/${id}?mode=${mode}`, {
       method: "DELETE",
     }),
   respondApproval: (requestId: string, decision: ApprovalDecision) =>

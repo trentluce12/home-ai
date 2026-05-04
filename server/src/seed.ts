@@ -222,8 +222,12 @@ Hybrid retrieval (FTS + cosine via RRF) sits on top — embeddings handle paraph
 ];
 
 function reset() {
+  // Order matters: child rows before parents. note_folders has a self-FK
+  // CASCADE that handles its own subtree, but we drop it explicitly so the
+  // post-seed state is "no folders" — the smoke step in m6p3-folder-schema
+  // verifies the table is empty after `npm run dev` reseeds.
   db.exec(
-    `DELETE FROM node_notes; DELETE FROM node_embeddings; DELETE FROM edges; DELETE FROM nodes; DELETE FROM provenance;`,
+    `DELETE FROM node_notes; DELETE FROM note_folders; DELETE FROM node_embeddings; DELETE FROM edges; DELETE FROM nodes; DELETE FROM provenance;`,
   );
 }
 

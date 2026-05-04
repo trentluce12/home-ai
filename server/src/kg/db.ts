@@ -129,12 +129,49 @@ CREATE TABLE IF NOT EXISTS node_layout (
 -- decoupled from the underlying node's name. On migration of a pre-M6 DB the
 -- column is added nullable + backfilled from nodes.name (see the ALTER TABLE
 -- block below SCHEMA_SQL). Fresh DBs declare it NOT NULL.
+--
+-- M6 phase 3: 'folder_id' column threads notes into the optional folder tree
+-- (NULL = unfiled root). FK is ON DELETE SET NULL so deleting a folder un-files
+-- its notes by default — the note row itself survives. The 'cascade' mode in
+-- deleteFolder manually walks descendants to actually drop the underlying
+-- nodes (which CASCADEs the note rows via nodes(id)); see deleteFolder.
 CREATE TABLE IF NOT EXISTS node_notes (
   node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
   body TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  folder_id INTEGER REFERENCES note_folders(id) ON DELETE SET NULL
 );
+
+-- The idx_node_notes_folder_id index is created AFTER the phase-3 migration
+-- block below, not here — on a pre-phase-3 DB the column doesn't exist yet
+-- and the index DDL would fail before the ALTER TABLE has a chance to run.
+
+-- M6 phase 3: folder tree for the Notes sidebar. Pure UI organization layer
+-- over notes — no edges, no embeddings, no provenance, opaque to the agent.
+-- Folders nest via self-FK on parent_id (CASCADE so deleting a parent drops
+-- all descendant folders). NULL parent_id = root. Folder name is unique
+-- per-parent; see the supporting indexes below SCHEMA_SQL — SQLite treats
+-- NULLs as distinct in UNIQUE constraints, so root-level uniqueness needs a
+-- partial index alongside the table-level constraint.
+CREATE TABLE IF NOT EXISTS note_folders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  parent_id INTEGER REFERENCES note_folders(id) ON DELETE CASCADE,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch() * 1000),
+  UNIQUE(parent_id, name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_note_folders_parent_id ON note_folders(parent_id);
+
+-- Root-level uniqueness: SQLite's UNIQUE(parent_id, name) treats every NULL
+-- parent_id as distinct, so without this partial index two root folders could
+-- share a name. The CONFLICT error message will name this index instead of
+-- the table constraint when the collision happens at the root, but the
+-- application surfaces a clean error either way (see createFolder).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_note_folders_root_name
+  ON note_folders(name) WHERE parent_id IS NULL;
 
 -- M4.5 auth: server-side session tokens (DB-backed cookies).
 -- Token is a 32-byte URL-safe random (base64url). Sliding 30-day idle expiry —
@@ -159,6 +196,13 @@ db.exec(SCHEMA_SQL);
 // a no-op there. We can't retroactively make the migrated column NOT NULL
 // without a full table rebuild, but the application-level invariant (setNote
 // always supplies a non-null name on insert) keeps the data clean.
+//
+// M6 phase 3 migration: pre-phase-3 DBs lack `folder_id`. Add it nullable
+// (no FK enforcement on existing rows is fine — they're all NULL).
+// SQLite's `ALTER TABLE ADD COLUMN` accepts a column-level REFERENCES, but
+// it's recorded only as metadata; it's still enforced once `foreign_keys = ON`
+// for any subsequent writes that supply a value. Fresh DBs created via
+// SCHEMA_SQL already have the column with the FK declared.
 {
   const cols = db.prepare("PRAGMA table_info(node_notes)").all() as {
     name: string;
@@ -172,7 +216,20 @@ db.exec(SCHEMA_SQL);
        WHERE name IS NULL;
     `);
   }
+  const hasFolderIdCol = cols.some((c) => c.name === "folder_id");
+  if (!hasFolderIdCol) {
+    db.exec(
+      `ALTER TABLE node_notes
+        ADD COLUMN folder_id INTEGER REFERENCES note_folders(id) ON DELETE SET NULL`,
+    );
+  }
 }
+
+// Indexes that depend on the phase-3 column. Safe to run unconditionally:
+// the column is guaranteed to exist by this point (either declared in
+// SCHEMA_SQL on fresh DBs or added by the ALTER TABLE above on migrated
+// ones).
+db.exec(`CREATE INDEX IF NOT EXISTS idx_node_notes_folder_id ON node_notes(folder_id)`);
 
 const alphabet = "0123456789abcdefghijklmnopqrstuvwxyz";
 const nanoid = customAlphabet(alphabet, 12);
@@ -998,16 +1055,37 @@ export interface NodeNote {
   name: string;
   body: string;
   updatedAt: string;
+  /**
+   * M6 phase 3: optional parent folder. NULL when the note lives at the
+   * unfiled root. Folders are pure UI organization — the agent never sees
+   * this field.
+   */
+  folderId: number | null;
 }
 
 export function getNote(nodeId: string): NodeNote | null {
   const row = db
-    .prepare(`SELECT node_id, name, body, updated_at FROM node_notes WHERE node_id = ?`)
+    .prepare(
+      `SELECT node_id, name, body, updated_at, folder_id
+         FROM node_notes WHERE node_id = ?`,
+    )
     .get(nodeId) as
-    | { node_id: string; name: string; body: string; updated_at: string }
+    | {
+        node_id: string;
+        name: string;
+        body: string;
+        updated_at: string;
+        folder_id: number | null;
+      }
     | undefined;
   return row
-    ? { nodeId: row.node_id, name: row.name, body: row.body, updatedAt: row.updated_at }
+    ? {
+        nodeId: row.node_id,
+        name: row.name,
+        body: row.body,
+        updatedAt: row.updated_at,
+        folderId: row.folder_id,
+      }
     : null;
 }
 
@@ -1027,8 +1105,8 @@ export function getNote(nodeId: string): NodeNote | null {
 export function setNote(nodeId: string, body: string, name?: string): NodeNote {
   const updatedAt = new Date().toISOString();
   const existing = db
-    .prepare(`SELECT name FROM node_notes WHERE node_id = ?`)
-    .get(nodeId) as { name: string } | undefined;
+    .prepare(`SELECT name, folder_id FROM node_notes WHERE node_id = ?`)
+    .get(nodeId) as { name: string; folder_id: number | null } | undefined;
 
   let resolvedName: string;
   if (existing) {
@@ -1045,6 +1123,10 @@ export function setNote(nodeId: string, body: string, name?: string): NodeNote {
     resolvedName = node.name;
   }
 
+  // `folder_id` is intentionally NOT touched by setNote — it's managed
+  // separately via `moveNote`. The ON CONFLICT clause only updates the
+  // body/name/updated_at columns so a body edit can't accidentally clobber
+  // the folder assignment.
   db.prepare(
     `INSERT INTO node_notes (node_id, name, body, updated_at) VALUES (?, ?, ?, ?)
      ON CONFLICT(node_id) DO UPDATE SET
@@ -1052,7 +1134,13 @@ export function setNote(nodeId: string, body: string, name?: string): NodeNote {
        body = excluded.body,
        updated_at = excluded.updated_at`,
   ).run(nodeId, resolvedName, body, updatedAt);
-  return { nodeId, name: resolvedName, body, updatedAt };
+  return {
+    nodeId,
+    name: resolvedName,
+    body,
+    updatedAt,
+    folderId: existing?.folder_id ?? null,
+  };
 }
 
 /**
@@ -1074,14 +1162,26 @@ export function createNoteWithNode(input: {
   name: string;
   type?: string;
   body?: string;
+  folderId?: number | null;
 }): { node: Node; note: NodeNote } {
   const type = input.type ?? "Generic";
   const body = input.body ?? "";
+  const folderId = input.folderId ?? null;
   let node!: Node;
   let note!: NodeNote;
   const tx = db.transaction(() => {
     node = addNode({ type, name: input.name });
     note = setNote(node.id, body, input.name);
+    // setNote leaves folder_id untouched (defaults to NULL on insert). Apply
+    // the requested folder assignment in the same transaction so the row is
+    // never visible without its folder.
+    if (folderId !== null) {
+      db.prepare(`UPDATE node_notes SET folder_id = ? WHERE node_id = ?`).run(
+        folderId,
+        node.id,
+      );
+      note = { ...note, folderId };
+    }
   });
   tx();
   return { node, note };
@@ -1103,12 +1203,282 @@ export function renameNote(nodeId: string, name: string): NodeNote | null {
     updatedAt,
     nodeId,
   );
-  return { nodeId, name, body: existing.body, updatedAt };
+  return {
+    nodeId,
+    name,
+    body: existing.body,
+    updatedAt,
+    folderId: existing.folderId,
+  };
 }
 
 export function deleteNote(nodeId: string): { deleted: boolean } {
   const info = db.prepare(`DELETE FROM node_notes WHERE node_id = ?`).run(nodeId);
   return { deleted: info.changes > 0 };
+}
+
+// ───────── M6 phase 3: folder tree ─────────
+//
+// Folders are a pure UI organization layer over notes. They have no edges,
+// no embeddings, no provenance, and the agent never sees them — retrieval and
+// the system prompt route around them entirely. The flat list returned here
+// is shaped for the client to assemble into a tree (parent_id pointers); the
+// server doesn't materialize the tree itself.
+
+export interface NoteFolder {
+  id: number;
+  name: string;
+  parentId: number | null;
+  sortOrder: number;
+  createdAt: number;
+}
+
+interface NoteFolderRow {
+  id: number;
+  name: string;
+  parent_id: number | null;
+  sort_order: number;
+  created_at: number;
+}
+
+function folderFromRow(row: NoteFolderRow): NoteFolder {
+  return {
+    id: row.id,
+    name: row.name,
+    parentId: row.parent_id,
+    sortOrder: row.sort_order,
+    createdAt: row.created_at,
+  };
+}
+
+/**
+ * Flat list of every folder, ordered by (parent_id, sort_order, name) so a
+ * client building the tree can iterate in display order. The client owns
+ * tree assembly — keeping it flat keeps the contract stable as folder
+ * features evolve (per-folder defaults in phase 4, etc.).
+ */
+export function listFolders(): NoteFolder[] {
+  const rows = db
+    .prepare(
+      `SELECT id, name, parent_id, sort_order, created_at
+         FROM note_folders
+        ORDER BY parent_id NULLS FIRST, sort_order ASC, name ASC`,
+    )
+    .all() as NoteFolderRow[];
+  return rows.map(folderFromRow);
+}
+
+/**
+ * Create a new folder. `parentId === null` means root. Throws on duplicate
+ * name within the same parent (UNIQUE constraint or partial root index).
+ * Caller (HTTP route) translates the SQLite error into a 409.
+ */
+export function createFolder(input: {
+  name: string;
+  parentId: number | null;
+  sortOrder?: number;
+}): NoteFolder {
+  const sortOrder = input.sortOrder ?? 0;
+  const info = db
+    .prepare(`INSERT INTO note_folders (name, parent_id, sort_order) VALUES (?, ?, ?)`)
+    .run(input.name, input.parentId, sortOrder);
+  const id = Number(info.lastInsertRowid);
+  const row = db
+    .prepare(
+      `SELECT id, name, parent_id, sort_order, created_at
+         FROM note_folders WHERE id = ?`,
+    )
+    .get(id) as NoteFolderRow;
+  return folderFromRow(row);
+}
+
+/**
+ * Rename a folder. Returns null when the folder doesn't exist; throws on
+ * unique-constraint violation (sibling with the same name).
+ */
+export function renameFolder(id: number, newName: string): NoteFolder | null {
+  const info = db
+    .prepare(`UPDATE note_folders SET name = ? WHERE id = ?`)
+    .run(newName, id);
+  if (info.changes === 0) return null;
+  const row = db
+    .prepare(
+      `SELECT id, name, parent_id, sort_order, created_at
+         FROM note_folders WHERE id = ?`,
+    )
+    .get(id) as NoteFolderRow;
+  return folderFromRow(row);
+}
+
+/**
+ * Move a folder to a new parent (NULL = root). Returns null if the folder
+ * doesn't exist; throws on unique-constraint violation against the new
+ * parent's children.
+ *
+ * Cycle prevention: walks the new parent's ancestor chain and rejects if
+ * `id` appears in it (or equals `newParentId` directly). SQLite has no
+ * native recursive-FK guard, and a cycle would lock the affected subtree
+ * out of `listFolders`'s ordered traversal.
+ */
+export function moveFolder(id: number, newParentId: number | null): NoteFolder | null {
+  if (newParentId !== null) {
+    if (newParentId === id) {
+      throw new Error("moveFolder: cannot make a folder its own parent");
+    }
+    // Walk up the proposed parent's chain. If we hit `id`, that move would
+    // create a cycle. Bound the walk by the row count to avoid infinite
+    // loops on a pre-existing cycle (shouldn't happen, but defensive).
+    const totalRows = (
+      db.prepare(`SELECT COUNT(*) c FROM note_folders`).get() as { c: number }
+    ).c;
+    const parentStmt = db.prepare(`SELECT parent_id FROM note_folders WHERE id = ?`);
+    let cursor: number | null = newParentId;
+    for (let steps = 0; cursor !== null && steps <= totalRows; steps++) {
+      if (cursor === id) {
+        throw new Error("moveFolder: would create a cycle in the folder tree");
+      }
+      const r = parentStmt.get(cursor) as { parent_id: number | null } | undefined;
+      if (!r) break;
+      cursor = r.parent_id;
+    }
+  }
+  const info = db
+    .prepare(`UPDATE note_folders SET parent_id = ? WHERE id = ?`)
+    .run(newParentId, id);
+  if (info.changes === 0) return null;
+  const row = db
+    .prepare(
+      `SELECT id, name, parent_id, sort_order, created_at
+         FROM note_folders WHERE id = ?`,
+    )
+    .get(id) as NoteFolderRow;
+  return folderFromRow(row);
+}
+
+/**
+ * Delete a folder.
+ *
+ * - `mode: "unfile"` — drops the folder + all descendant folders (CASCADE on
+ *   `note_folders.parent_id` does the recursion). Notes attached to any of
+ *   those folders survive: the FK on `node_notes.folder_id` is `ON DELETE
+ *   SET NULL`, so they end up at the unfiled root. This is the safe default.
+ *
+ * - `mode: "cascade"` — drops the folder, all descendant folders, AND the
+ *   underlying nodes for every note that lived inside any of them. Because
+ *   `node_notes.folder_id` is `SET NULL` (not CASCADE), the deletion has to
+ *   walk the descendant set explicitly and `DELETE FROM nodes` for each note;
+ *   the cascade on `nodes(id)` then clears `node_notes`, embeddings, layout,
+ *   and provenance. The folder rows themselves are dropped by the same parent
+ *   FK cascade as the unfile mode.
+ *
+ * Returns counts so callers can surface them (the UI uses them in the
+ * non-empty-delete prompt's confirmation copy).
+ */
+export function deleteFolder(
+  id: number,
+  mode: "unfile" | "cascade",
+): { deleted: boolean; foldersRemoved: number; notesAffected: number } {
+  const exists = db.prepare(`SELECT 1 FROM note_folders WHERE id = ?`).get(id);
+  if (!exists) return { deleted: false, foldersRemoved: 0, notesAffected: 0 };
+
+  // Collect the descendant folder set up front. Needed by both modes:
+  // unfile mode uses the count for reporting; cascade mode uses the ids
+  // to find which notes to drop.
+  const descendantIds: number[] = [id];
+  {
+    const queue: number[] = [id];
+    const childStmt = db.prepare(`SELECT id FROM note_folders WHERE parent_id = ?`);
+    while (queue.length > 0) {
+      const cur = queue.shift();
+      if (cur === undefined) break;
+      const children = childStmt.all(cur) as { id: number }[];
+      for (const c of children) {
+        descendantIds.push(c.id);
+        queue.push(c.id);
+      }
+    }
+  }
+
+  let notesAffected = 0;
+  const tx = db.transaction(() => {
+    const placeholders = descendantIds.map(() => "?").join(",");
+    if (mode === "cascade") {
+      // Find every note rooted in this subtree, then delete the underlying
+      // nodes — that cascades through `node_notes`, `node_embeddings`,
+      // `node_layout`, and any node-kind provenance via `deleteNode`'s
+      // explicit handling. We route through `deleteNode` (not raw DELETE
+      // FROM nodes) so edge provenance is cleaned too.
+      //
+      // Defensive note-row cleanup: in a healthy schema the FK on
+      // `node_notes.node_id REFERENCES nodes(id) ON DELETE CASCADE` drops
+      // the note row when its node disappears. But pre-existing DBs built
+      // before that FK was declared (or where it was lost across an ALTER
+      // TABLE rebuild) leave the row orphaned. We DELETE the note row
+      // explicitly first so the contract holds regardless of FK history.
+      const noteRows = db
+        .prepare(`SELECT node_id FROM node_notes WHERE folder_id IN (${placeholders})`)
+        .all(...descendantIds) as { node_id: string }[];
+      const deleteNoteStmt = db.prepare(`DELETE FROM node_notes WHERE node_id = ?`);
+      for (const r of noteRows) {
+        deleteNoteStmt.run(r.node_id);
+        deleteNode(r.node_id);
+      }
+      notesAffected = noteRows.length;
+    } else {
+      // Unfile: count what's about to get SET NULL'd so the caller can
+      // report it. The actual NULL'ing happens via FK cascade when we drop
+      // the folder rows below.
+      const countRow = db
+        .prepare(`SELECT COUNT(*) c FROM node_notes WHERE folder_id IN (${placeholders})`)
+        .get(...descendantIds) as { c: number };
+      notesAffected = countRow.c;
+    }
+
+    // Drop the root folder; the self-FK cascade on parent_id removes every
+    // descendant folder row. (We can't `DELETE WHERE id IN (...)` cleanly
+    // because the cascade would try to fire for already-deleted rows; one
+    // root delete + cascade is the simpler shape.)
+    db.prepare(`DELETE FROM note_folders WHERE id = ?`).run(id);
+  });
+  tx();
+
+  return {
+    deleted: true,
+    foldersRemoved: descendantIds.length,
+    notesAffected,
+  };
+}
+
+/**
+ * Move a note into / out of a folder. `folderId === null` un-files the note
+ * (back to the root). Returns null when the note row doesn't exist; throws
+ * if `folderId` references a non-existent folder (FK enforcement).
+ */
+export function moveNote(nodeId: string, folderId: number | null): NodeNote | null {
+  const info = db
+    .prepare(`UPDATE node_notes SET folder_id = ? WHERE node_id = ?`)
+    .run(folderId, nodeId);
+  if (info.changes === 0) return null;
+  return getNote(nodeId);
+}
+
+/**
+ * Set a folder's `sort_order`. Pure write — the client decides what number
+ * to assign (e.g. midpoint between neighbors for drag-reorder). Returns
+ * null when the folder doesn't exist.
+ */
+export function reorderFolder(id: number, sortOrder: number): NoteFolder | null {
+  const info = db
+    .prepare(`UPDATE note_folders SET sort_order = ? WHERE id = ?`)
+    .run(sortOrder, id);
+  if (info.changes === 0) return null;
+  const row = db
+    .prepare(
+      `SELECT id, name, parent_id, sort_order, created_at
+         FROM note_folders WHERE id = ?`,
+    )
+    .get(id) as NoteFolderRow;
+  return folderFromRow(row);
 }
 
 export function recordProvenance(input: {
