@@ -188,6 +188,12 @@ function StatsAndRecent({ refreshKey }: { refreshKey: number }) {
   );
 }
 
+/**
+ * Recent-notes widget on the dashboard. Each row's primary label is the
+ * note's own `name` (M6 phase 2 — sourced from `node_notes.name`, decoupled
+ * from the underlying node's name). `n.type` continues to mirror the
+ * underlying node's type since notes don't have their own type.
+ */
 function NotesPanel({
   refreshKey,
   onOpenNode,

@@ -158,8 +158,17 @@ const FACTS: SeedFact[] = [
 ];
 
 interface SeedNote {
-  name: string;
+  /** Looks up the parent node by `(nodeName, type)`. */
+  nodeName: string;
   type: string;
+  /**
+   * Display label for the note itself (M6 phase 2). Decoupled from the
+   * parent node's name — a note attached to `Person:Alice` might be called
+   * "Alice's birthday list" without renaming Alice. Defaulting to the node
+   * name keeps the seed's starting state sensible while exercising the
+   * decoupled-name code path.
+   */
+  noteName: string;
   body: string;
 }
 
@@ -169,13 +178,15 @@ interface SeedNote {
 // the retrieval-preview truncation path is exercised.
 const NOTES: SeedNote[] = [
   {
-    name: "Snickers",
+    nodeName: "Snickers",
     type: "Pet",
+    noteName: "Snickers",
     body: `Snickers is a 4-year-old golden retriever. Loves squeaky toys (especially the orange duck), gets the zoomies after baths, and only eats kibble if it's mixed with a spoonful of plain yogurt. Mildly afraid of the vacuum but pretends to be braver than he is. Allergic to chicken — switched him to a salmon-based food in early 2026.`,
   },
   {
-    name: "home-ai",
+    nodeName: "home-ai",
     type: "Project",
+    noteName: "home-ai",
     body: `# home-ai
 
 A personal "home AI" — local-first chat UI on top of the Anthropic API, layered over a SQLite knowledge graph the agent reads from and writes back into.
@@ -191,13 +202,15 @@ Off-the-shelf chatbots forget everything between sessions. home-ai treats memory
 TypeScript + React + Vite + Tailwind on the frontend; Hono + Anthropic Agent SDK on the server; better-sqlite3 + Voyage embeddings + FTS5 for the KG.`,
   },
   {
-    name: "TypeScript",
+    nodeName: "TypeScript",
     type: "Topic",
+    noteName: "TypeScript",
     body: `User has been writing TypeScript professionally since ~2019. Strong preference for strict mode, no \`any\`, and SDK types over hand-rolled equivalents. Avoids \`!\` non-null assertions on principle.`,
   },
   {
-    name: "Knowledge graphs",
+    nodeName: "Knowledge graphs",
     type: "Topic",
+    noteName: "Knowledge graphs",
     body: `Why home-ai is built around a KG rather than vector search alone:
 
 - **Edges carry semantics that embeddings flatten.** "user OWNS Snickers" vs. "user FEARS Snickers" both embed nearby; the edge type disambiguates.
@@ -238,14 +251,14 @@ async function run() {
 
   let noteCount = 0;
   for (const note of NOTES) {
-    const id = nodeKeyToId.get(keyOf(note.name, note.type));
+    const id = nodeKeyToId.get(keyOf(note.nodeName, note.type));
     if (!id) {
       console.warn(
-        `[seed] skipping note for ${note.type}:${note.name} — no matching node`,
+        `[seed] skipping note for ${note.type}:${note.nodeName} — no matching node`,
       );
       continue;
     }
-    setNote(id, note.body);
+    setNote(id, note.body, note.noteName);
     noteCount++;
   }
 

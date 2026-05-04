@@ -96,6 +96,13 @@ export interface NodeDetail {
 
 export interface NodeNote {
   nodeId: string;
+  /**
+   * The note's own display label (M6 phase 2). Decoupled from the
+   * underlying node's name — renaming the note doesn't rename the node.
+   * Defaults to the node's name when a note is first created via the
+   * editor (the server fills it in when the PUT body omits `name`).
+   */
+  name: string;
   body: string;
   updatedAt: string;
 }
@@ -105,6 +112,10 @@ export interface NodeNote {
  * ordered by note recency. `preview` is whitespace-collapsed and truncated
  * to ~200 chars (with a trailing ellipsis only when the body actually exceeded
  * the limit). `updatedAt` is the ISO-8601 string from `node_notes.updated_at`.
+ *
+ * M6 phase 2: `name` is the note's own renamable label, sourced from
+ * `node_notes.name` (not the underlying node's name). `type` continues to
+ * mirror the node's type — notes don't have their own type.
  */
 export interface KgNoteListEntry {
   nodeId: string;
@@ -242,11 +253,24 @@ export const api = {
   notes: () => jsonFetch<KgNoteListEntry[]>("/api/kg/notes"),
   getNote: (id: string) =>
     jsonFetch<{ note: NodeNote | null }>(`/api/kg/node/${id}/note`),
-  setNote: (id: string, body: string) =>
+  setNote: (id: string, body: string, name?: string) =>
     jsonFetch<{ note: NodeNote | null }>(`/api/kg/node/${id}/note`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ body }),
+      // Only include `name` in the body when the caller passed one; the
+      // server preserves the existing label when the field is absent.
+      body: JSON.stringify(name === undefined ? { body } : { body, name }),
+    }),
+  /**
+   * Rename a note without touching its body. Wired to the right-click
+   * `Rename` action in phase 3; the route ships in phase 2 so the API
+   * surface is complete for callers that want to rename programmatically.
+   */
+  renameNote: (id: string, name: string) =>
+    jsonFetch<{ note: NodeNote }>(`/api/kg/node/${id}/note`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
     }),
   deleteNote: (id: string) =>
     jsonFetch<{ deleted: boolean }>(`/api/kg/node/${id}/note`, {

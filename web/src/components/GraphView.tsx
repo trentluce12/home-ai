@@ -558,6 +558,11 @@ const NOTE_PROSE = [
  * the server when focus leaves the textarea (or the panel unmounts mid-edit).
  * An empty-after-trim body is treated as a delete by the server, so an unused
  * editor doesn't leave empty rows behind.
+ *
+ * M6 phase 2: this body-only editor stays unchanged. `api.setNote` is called
+ * without a `name` argument, which the server treats as "preserve existing
+ * name on update / default to the node's name on insert" — body edits never
+ * clobber the note's display label.
  */
 function NoteEditor({ nodeId }: { nodeId: string }) {
   const [note, setNote] = useState<NodeNote | null>(null);

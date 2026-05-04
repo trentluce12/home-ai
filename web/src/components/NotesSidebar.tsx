@@ -11,8 +11,8 @@ interface Props {
   /**
    * Called when the user picks a note row. The display `name` is forwarded
    * so the parent can pass it to `NotesView` for the preview/split header
-   * without a second round-trip — phase 2 surfaces the underlying node's
-   * name (a dedicated note `name` column lands in the next story).
+   * without a second round-trip. M6 phase 2: this is now the note's own
+   * `name` (from `node_notes.name`), not the underlying node's name.
    */
   onSelectNote: (nodeId: string, name: string) => void;
   /** Click X (or click `Notes` in the primary sidebar again) to collapse. */
@@ -29,8 +29,8 @@ interface Props {
  * Secondary sidebar that slides out to the right of the primary nav when
  * `Notes` is selected. Phase 2 is flat-list-only — folder hierarchy lands
  * in phase 3. Each row is a node-attached note (`KgNoteListEntry`); the
- * display label is the underlying node's name (the dedicated note-name
- * column lands in `m6p2-note-name-field`, the next story).
+ * display label is the note's own `name` (M6 phase 2 — sourced from
+ * `node_notes.name`, decoupled from the underlying node's name).
  */
 export function NotesSidebar({
   selectedNoteId,

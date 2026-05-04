@@ -124,8 +124,14 @@ CREATE TABLE IF NOT EXISTS node_layout (
 -- forget so notes never orphan. updated_at is an ISO-8601 string (per the
 -- M5 design); the rest of the schema uses INTEGER ms-since-epoch -- one-off
 -- inconsistency intentional to match the M5 spec.
+--
+-- M6 phase 2: 'name' column gives the note its own renamable display label,
+-- decoupled from the underlying node's name. On migration of a pre-M6 DB the
+-- column is added nullable + backfilled from nodes.name (see the ALTER TABLE
+-- block below SCHEMA_SQL). Fresh DBs declare it NOT NULL.
 CREATE TABLE IF NOT EXISTS node_notes (
   node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
   body TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -146,6 +152,27 @@ CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at
 `;
 
 db.exec(SCHEMA_SQL);
+
+// M6 phase 2 migration: pre-M6 DBs created `node_notes` without a `name`
+// column. Add it nullable + backfill from `nodes.name`. Fresh DBs created via
+// SCHEMA_SQL above already have the column declared NOT NULL, so the check is
+// a no-op there. We can't retroactively make the migrated column NOT NULL
+// without a full table rebuild, but the application-level invariant (setNote
+// always supplies a non-null name on insert) keeps the data clean.
+{
+  const cols = db.prepare("PRAGMA table_info(node_notes)").all() as {
+    name: string;
+  }[];
+  const hasNameCol = cols.some((c) => c.name === "name");
+  if (!hasNameCol) {
+    db.exec(`
+      ALTER TABLE node_notes ADD COLUMN name TEXT;
+      UPDATE node_notes
+         SET name = (SELECT name FROM nodes WHERE nodes.id = node_notes.node_id)
+       WHERE name IS NULL;
+    `);
+  }
+}
 
 const alphabet = "0123456789abcdefghijklmnopqrstuvwxyz";
 const nanoid = customAlphabet(alphabet, 12);
@@ -968,26 +995,83 @@ export function saveLayout(positions: NodeLayoutRow[]): void {
 
 export interface NodeNote {
   nodeId: string;
+  name: string;
   body: string;
   updatedAt: string;
 }
 
 export function getNote(nodeId: string): NodeNote | null {
   const row = db
-    .prepare(`SELECT node_id, body, updated_at FROM node_notes WHERE node_id = ?`)
-    .get(nodeId) as { node_id: string; body: string; updated_at: string } | undefined;
-  return row ? { nodeId: row.node_id, body: row.body, updatedAt: row.updated_at } : null;
+    .prepare(`SELECT node_id, name, body, updated_at FROM node_notes WHERE node_id = ?`)
+    .get(nodeId) as
+    | { node_id: string; name: string; body: string; updated_at: string }
+    | undefined;
+  return row
+    ? { nodeId: row.node_id, name: row.name, body: row.body, updatedAt: row.updated_at }
+    : null;
 }
 
-export function setNote(nodeId: string, body: string): NodeNote {
+/**
+ * Upsert a note row. M6 phase 2: `name` is the note's own display label,
+ * decoupled from the underlying node's name.
+ *
+ * - On INSERT (no existing row): `name` defaults to the parent node's name
+ *   when omitted. This keeps the editor + agent's `propose_note_edit` flow
+ *   (which only knows about the body) sensible without each caller having
+ *   to look up the node first.
+ * - On UPDATE (row exists): if `name` is omitted, the existing value is
+ *   preserved — body-only edits don't clobber a previously-renamed note.
+ *
+ * Throws if `nodeId` doesn't exist on insert (we need its name as fallback).
+ */
+export function setNote(nodeId: string, body: string, name?: string): NodeNote {
   const updatedAt = new Date().toISOString();
+  const existing = db
+    .prepare(`SELECT name FROM node_notes WHERE node_id = ?`)
+    .get(nodeId) as { name: string } | undefined;
+
+  let resolvedName: string;
+  if (existing) {
+    resolvedName = name ?? existing.name;
+  } else if (name !== undefined) {
+    resolvedName = name;
+  } else {
+    const node = db.prepare(`SELECT name FROM nodes WHERE id = ?`).get(nodeId) as
+      | { name: string }
+      | undefined;
+    if (!node) {
+      throw new Error(`setNote: node ${nodeId} not found and no name provided`);
+    }
+    resolvedName = node.name;
+  }
+
   db.prepare(
-    `INSERT INTO node_notes (node_id, body, updated_at) VALUES (?, ?, ?)
+    `INSERT INTO node_notes (node_id, name, body, updated_at) VALUES (?, ?, ?, ?)
      ON CONFLICT(node_id) DO UPDATE SET
+       name = excluded.name,
        body = excluded.body,
        updated_at = excluded.updated_at`,
-  ).run(nodeId, body, updatedAt);
-  return { nodeId, body, updatedAt };
+  ).run(nodeId, resolvedName, body, updatedAt);
+  return { nodeId, name: resolvedName, body, updatedAt };
+}
+
+/**
+ * Rename a note without touching its body. Returns null when the note row
+ * doesn't exist — callers (the PATCH route) translate that to a 404. The
+ * body-only `setNote` upserts a fresh row; rename pointedly does NOT, since
+ * a rename of a non-existent note is meaningless (no body to attach the
+ * label to).
+ */
+export function renameNote(nodeId: string, name: string): NodeNote | null {
+  const existing = getNote(nodeId);
+  if (!existing) return null;
+  const updatedAt = new Date().toISOString();
+  db.prepare(`UPDATE node_notes SET name = ?, updated_at = ? WHERE node_id = ?`).run(
+    name,
+    updatedAt,
+    nodeId,
+  );
+  return { nodeId, name, body: existing.body, updatedAt };
 }
 
 export function deleteNote(nodeId: string): { deleted: boolean } {

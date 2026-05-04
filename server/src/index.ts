@@ -601,16 +601,44 @@ app.get("/api/kg/node/:id/note", (c) => {
 app.put("/api/kg/node/:id/note", async (c) => {
   const id = c.req.param("id");
   if (!kg.getNode(id)) return c.json({ error: "Node not found" }, 404);
-  const body = await c.req.json<{ body?: unknown }>().catch(() => null);
+  const body = await c.req.json<{ body?: unknown; name?: unknown }>().catch(() => null);
   if (!body || typeof body.body !== "string") {
     return c.json({ error: "body (string) required" }, 400);
+  }
+  // Optional `name` (M6 phase 2): when present, sets the note's display label;
+  // when omitted, `setNote` preserves the existing value (or defaults to the
+  // node's name on insert). Reject empty strings — they're never useful and
+  // would let a caller wipe the label without a body change.
+  let name: string | undefined;
+  if (body.name !== undefined) {
+    if (typeof body.name !== "string" || body.name.trim().length === 0) {
+      return c.json({ error: "name must be a non-empty string when provided" }, 400);
+    }
+    name = body.name;
   }
   const trimmed = body.body.trim();
   if (trimmed.length === 0) {
     kg.deleteNote(id);
     return c.json({ note: null });
   }
-  const note = kg.setNote(id, body.body);
+  const note = kg.setNote(id, body.body, name);
+  return c.json({ note });
+});
+
+// Rename-only endpoint (M6 phase 2). Phase 3 wires this up to the right-click
+// `Rename` action in the secondary sidebar; phase 2 ships the route so the
+// schema + API surface are complete in one shot. 404 when the note row
+// doesn't exist — renaming a non-existent note is meaningless (no body to
+// attach the label to).
+app.patch("/api/kg/node/:id/note", async (c) => {
+  const id = c.req.param("id");
+  if (!kg.getNode(id)) return c.json({ error: "Node not found" }, 404);
+  const body = await c.req.json<{ name?: unknown }>().catch(() => null);
+  if (!body || typeof body.name !== "string" || body.name.trim().length === 0) {
+    return c.json({ error: "name (non-empty string) required" }, 400);
+  }
+  const note = kg.renameNote(id, body.name);
+  if (!note) return c.json({ error: "Note not found" }, 404);
   return c.json({ note });
 });
 
@@ -625,11 +653,16 @@ app.delete("/api/kg/node/:id/note", (c) => {
 // "notes" panel (M5 phase 1 — `m5p1-notes-panel`). Ordered by note recency
 // so freshly-written notes float to the top. Preview matches the retrieval
 // snippet: whitespace-collapsed, ~200 chars, ellipsis only when truncated.
+//
+// M6 phase 2: `name` is now sourced from `node_notes.name` (the note's own
+// display label), not the underlying node's name. The two were aliased by
+// the seed at first dev startup but drift independently as the user renames
+// notes.
 const NOTES_PREVIEW_CHARS = 200;
 app.get("/api/kg/notes", (c) => {
   const rows = db
     .prepare(
-      `SELECT n.id as nodeId, n.name as name, n.type as type,
+      `SELECT n.id as nodeId, nn.name as name, n.type as type,
               nn.body as body, nn.updated_at as updatedAt
          FROM node_notes nn
          JOIN nodes n ON n.id = nn.node_id

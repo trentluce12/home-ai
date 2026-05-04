@@ -7,11 +7,13 @@ import { api } from "../lib/api";
 interface Props {
   nodeId: string;
   /**
-   * Display label shown as the header of the preview / split view. Phase 2
-   * uses the underlying node's name (sourced from the secondary sidebar's
-   * `KgNoteListEntry`); a dedicated note-name column lands in the next
-   * story (`m6p2-note-name-field`) at which point this becomes the note's
-   * own renamable label.
+   * Initial display label for the preview / split view header — shown
+   * immediately on mount before the GET `/note` round-trip resolves so the
+   * user sees the title flash-free. Once the GET returns we switch to the
+   * note's own `name` field (from `node_notes.name`, M6 phase 2). Both
+   * sources are the same per-row at sidebar-click time; the fetched value
+   * is preferred only because it's the canonical source of truth post-load
+   * (e.g. after a rename in another tab).
    */
   title: string;
   /**
@@ -55,6 +57,11 @@ type Status = "idle" | "loading" | "saving" | "error";
 export function NotesView({ nodeId, title, onChange }: Props) {
   const [mode, setMode] = useState<Mode>("preview");
   const [draft, setDraft] = useState("");
+  // Note's own display label, sourced from `node_notes.name` once the GET
+  // resolves. Falls back to the `title` prop (the sidebar's list-view name)
+  // before the round-trip completes so the header doesn't flicker. Stays
+  // null during the initial load → `title` is shown until the fetch lands.
+  const [noteName, setNoteName] = useState<string | null>(null);
   const [status, setStatus] = useState<Status>("loading");
   const [error, setError] = useState<string | null>(null);
 
@@ -67,6 +74,7 @@ export function NotesView({ nodeId, title, onChange }: Props) {
     setStatus("loading");
     setError(null);
     setMode("preview");
+    setNoteName(null);
     api
       .getNote(nodeId)
       .then((res) => {
@@ -74,6 +82,7 @@ export function NotesView({ nodeId, title, onChange }: Props) {
         const body = res.note?.body ?? "";
         setDraft(body);
         savedRef.current = body;
+        setNoteName(res.note?.name ?? null);
         setStatus("idle");
       })
       .catch((err) => {
@@ -143,7 +152,9 @@ export function NotesView({ nodeId, title, onChange }: Props) {
     return (
       <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-6 py-10 animate-fade-in">
         <header className="flex items-start justify-between gap-4">
-          <h1 className="text-2xl font-medium tracking-tight text-zinc-100">{title}</h1>
+          <h1 className="text-2xl font-medium tracking-tight text-zinc-100">
+            {noteName ?? title}
+          </h1>
           <button
             type="button"
             onClick={() => setMode("split")}
