@@ -17,6 +17,14 @@ interface Props {
    */
   title: string;
   /**
+   * Initial editor mode (M6 phase 2). Defaults to `preview` for normal row
+   * clicks. The inline-create flow passes `split` so the user lands in the
+   * editor with the textarea focused, ready to type the body. Only honoured
+   * once-per-mount — switching modes after that goes through the in-component
+   * Edit / Done buttons.
+   */
+  initialMode?: "preview" | "split";
+  /**
    * Bumped by the parent when the note body is saved so other surfaces that
    * depend on the note list (sidebar, dashboard recent-notes) re-fetch.
    */
@@ -54,9 +62,10 @@ type Status = "idle" | "loading" | "saving" | "error";
  * cycle through different notes as the user clicks rows in the secondary
  * sidebar without remounting / blanking the main panel.
  */
-export function NotesView({ nodeId, title, onChange }: Props) {
-  const [mode, setMode] = useState<Mode>("preview");
+export function NotesView({ nodeId, title, initialMode = "preview", onChange }: Props) {
+  const [mode, setMode] = useState<Mode>(initialMode);
   const [draft, setDraft] = useState("");
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   // Note's own display label, sourced from `node_notes.name` once the GET
   // resolves. Falls back to the `title` prop (the sidebar's list-view name)
   // before the round-trip completes so the header doesn't flicker. Stays
@@ -73,7 +82,11 @@ export function NotesView({ nodeId, title, onChange }: Props) {
     let cancelled = false;
     setStatus("loading");
     setError(null);
-    setMode("preview");
+    // Reset to `initialMode` on nodeId change so the same view instance can
+    // cycle through different notes without retaining the previous note's
+    // mode. For the inline-create flow `initialMode` is `split` and stays
+    // that way through this fetch; for normal row clicks it's `preview`.
+    setMode(initialMode);
     setNoteName(null);
     api
       .getNote(nodeId)
@@ -93,7 +106,22 @@ export function NotesView({ nodeId, title, onChange }: Props) {
     return () => {
       cancelled = true;
     };
+    // We intentionally key on `nodeId` only — `initialMode` is a per-mount
+    // hint, and the parent re-mounts via `key={nodeId}` when switching notes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodeId]);
+
+  // Auto-focus the textarea once the note loads while in split mode. Covers
+  // the inline-create flow (caller passes `initialMode="split"`) — the user
+  // typed a name in the sidebar, pressed Enter, and lands here ready to type
+  // the body without an extra click. Effect runs every time we transition
+  // into split mode while idle; in practice that's once-per-mount for fresh
+  // notes (status: loading → idle), and once-per-Edit-click for existing
+  // notes (idle → idle, mode flip).
+  useEffect(() => {
+    if (mode !== "split" || status !== "idle") return;
+    textareaRef.current?.focus();
+  }, [mode, status]);
 
   // Flush any pending changes when this view unmounts mid-edit (notes view
   // closed, switched note, opened a chat). Ref-driven so we don't need to
@@ -212,6 +240,7 @@ export function NotesView({ nodeId, title, onChange }: Props) {
       <div className="grid min-h-0 flex-1 grid-cols-2 divide-x divide-zinc-900/80">
         <div className="flex min-h-0 flex-col">
           <textarea
+            ref={textareaRef}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onBlur={handleBlur}

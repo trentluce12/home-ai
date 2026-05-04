@@ -251,6 +251,30 @@ export const api = {
       body: JSON.stringify({ positions }),
     }),
   notes: () => jsonFetch<KgNoteListEntry[]>("/api/kg/notes"),
+  /**
+   * Inline-create a new note from the Notes sidebar `+` button (M6 phase 2).
+   * Mints a node (default type `Generic`) plus a paired note row in a single
+   * server-side transaction. Returns the new `nodeId` so callers can select
+   * the freshly-created row and flip straight into split-edit mode.
+   *
+   * `type` defaults to `Generic` when omitted (the catch-all for unclassified
+   * notes — see the M6 phase 2 design log entry). `body` defaults to empty.
+   * `folderId` is reserved for phase 3; pass `null` (or omit) for now.
+   */
+  createNote: (input: {
+    name: string;
+    type?: string;
+    body?: string;
+    folderId?: string | null;
+  }) =>
+    jsonFetch<{ nodeId: string; name: string; body: string; updatedAt: string }>(
+      `/api/kg/notes`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(input),
+      },
+    ),
   getNote: (id: string) =>
     jsonFetch<{ note: NodeNote | null }>(`/api/kg/node/${id}/note`),
   setNote: (id: string, body: string, name?: string) =>

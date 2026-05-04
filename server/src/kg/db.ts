@@ -1056,6 +1056,38 @@ export function setNote(nodeId: string, body: string, name?: string): NodeNote {
 }
 
 /**
+ * Single-transaction "create node + create note" used by the M6 phase 2
+ * inline-create flow in the Notes secondary sidebar. The user types a name,
+ * presses Enter, and we mint a new node + a paired empty (or pre-filled) note
+ * atomically — no half-state where the node exists but the note doesn't.
+ *
+ * Default `type` is `"Generic"` (the catch-all type for inline-jotted notes
+ * that aren't classified yet — see the M6 phase 2 design log entry). Caller
+ * may override when there's a typing context (none yet in phase 2; phase 3
+ * will likely add per-folder default types).
+ *
+ * Embeddings are NOT generated inline — the caller (HTTP route) kicks off a
+ * background `embedNodes(...)` after this returns so the user's create-click
+ * latency doesn't wait on Voyage. Same posture as `record_user_fact`.
+ */
+export function createNoteWithNode(input: {
+  name: string;
+  type?: string;
+  body?: string;
+}): { node: Node; note: NodeNote } {
+  const type = input.type ?? "Generic";
+  const body = input.body ?? "";
+  let node!: Node;
+  let note!: NodeNote;
+  const tx = db.transaction(() => {
+    node = addNode({ type, name: input.name });
+    note = setNote(node.id, body, input.name);
+  });
+  tx();
+  return { node, note };
+}
+
+/**
  * Rename a note without touching its body. Returns null when the note row
  * doesn't exist — callers (the PATCH route) translate that to a 404. The
  * body-only `setNote` upserts a fresh row; rename pointedly does NOT, since

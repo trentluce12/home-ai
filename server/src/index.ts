@@ -692,6 +692,70 @@ app.get("/api/kg/notes", (c) => {
   return c.json(entries);
 });
 
+// Inline-create endpoint for the M6 phase 2 Notes sidebar `+` button. Body:
+// `{name, type?, body?, folderId?}`. Mints a node (default type `Generic`) +
+// a paired note row in a single transaction so there's no window where one
+// exists without the other. Returns the new note's `nodeId`/name/body/updatedAt
+// so the frontend can flip straight into split-edit mode without a follow-up
+// GET.
+//
+// `folderId` is currently rejected when present — folders land phase 3. Keeping
+// the field in the wire shape now means phase 3 only flips the validation
+// rather than redesigning the request body.
+//
+// Embeddings happen in the background (fire-and-forget), same posture as
+// `record_user_fact` — the user's click-to-row-commit latency doesn't wait on
+// Voyage. Failure is non-fatal: FTS still works; hybrid retrieval skips the
+// cosine pass for unembedded nodes until a future re-embed run catches them.
+app.post("/api/kg/notes", async (c) => {
+  const body = await c.req
+    .json<{ name?: unknown; type?: unknown; body?: unknown; folderId?: unknown }>()
+    .catch(() => null);
+  if (!body) return c.json({ error: "invalid JSON" }, 400);
+
+  const name = typeof body.name === "string" ? body.name.trim() : "";
+  if (!name) {
+    return c.json({ error: "name (non-empty string) required" }, 400);
+  }
+
+  let type: string | undefined;
+  if (body.type !== undefined) {
+    if (typeof body.type !== "string" || body.type.trim().length === 0) {
+      return c.json({ error: "type must be a non-empty string when provided" }, 400);
+    }
+    type = body.type.trim();
+  }
+
+  let noteBody = "";
+  if (body.body !== undefined) {
+    if (typeof body.body !== "string") {
+      return c.json({ error: "body must be a string when provided" }, 400);
+    }
+    noteBody = body.body;
+  }
+
+  // Phase 3 will add folder support; for now the field exists in the wire
+  // shape but must be null/absent. Reject anything else so a stale frontend
+  // doesn't silently lose a folder assignment.
+  if (body.folderId !== undefined && body.folderId !== null) {
+    return c.json({ error: "folderId not supported until phase 3" }, 400);
+  }
+
+  const { node, note } = kg.createNoteWithNode({ name, type, body: noteBody });
+  kg.recordProvenance({ factId: node.id, factKind: "node", source: "user_statement" });
+
+  embedNodes([node]).catch((err) =>
+    console.warn("[notes-create] embedding failed:", err),
+  );
+
+  return c.json({
+    nodeId: note.nodeId,
+    name: note.name,
+    body: note.body,
+    updatedAt: note.updatedAt,
+  });
+});
+
 app.get("/api/kg/graph", (c) => {
   const nodes = db.prepare(`SELECT id, name, type FROM nodes`).all() as {
     id: string;

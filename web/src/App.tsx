@@ -105,6 +105,11 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
   const [selectedNote, setSelectedNote] = useState<{
     nodeId: string;
     name: string;
+    // `initialMode` is set to "split" only by the inline-create flow, so the
+    // freshly-minted note opens with the editor focused and the user can type
+    // the body immediately. Normal row-clicks omit it (the field stays absent),
+    // which `NotesView` interprets as the default `preview`.
+    initialMode?: "preview" | "split";
   } | null>(null);
   const [showJumpPill, setShowJumpPill] = useState(false);
   const [approvalRequest, setApprovalRequest] = useState<ApprovalRequest | null>(null);
@@ -202,6 +207,15 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
 
   function handleSelectNote(nodeId: string, name: string) {
     setSelectedNote({ nodeId, name });
+  }
+
+  // Called by `NotesSidebar` when the inline-create flow successfully commits.
+  // We bump `refreshKey` so the sidebar re-fetches with the new row in its
+  // canonical place, then select the new note in `split` mode so the user
+  // lands in the editor with the textarea focused, ready to type the body.
+  function handleCreateNote(nodeId: string, name: string) {
+    setRefreshKey((k) => k + 1);
+    setSelectedNote({ nodeId, name, initialMode: "split" });
   }
 
   function stop() {
@@ -414,6 +428,7 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
           <NotesSidebar
             selectedNoteId={selectedNote?.nodeId ?? null}
             onSelectNote={handleSelectNote}
+            onCreateNote={handleCreateNote}
             onClose={handleToggleNotes}
             refreshKey={refreshKey}
           />
@@ -430,6 +445,7 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
                 key={selectedNote.nodeId}
                 nodeId={selectedNote.nodeId}
                 title={selectedNote.name}
+                initialMode={selectedNote.initialMode}
                 onChange={() => setRefreshKey((k) => k + 1)}
               />
             ) : (

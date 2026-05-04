@@ -27,6 +27,13 @@ const TYPE_COLORS: Record<string, string> = {
   Task: "#f87171",
   Preference: "#f472b6",
   Document: "#a3e635",
+  // M6 phase 2: `Generic` is the catch-all type for inline-jotted notes that
+  // aren't classified yet. Distinct zinc-tone slot (zinc-600) — readable
+  // against the dark background, in-family with `Person`/`Topic` to read as
+  // "the unclassified neutral default" rather than a bright accent. The
+  // chip + filter mechanism picks this color up automatically because it's
+  // keyed off `presentTypes` from the live graph data.
+  Generic: "#52525b",
 };
 
 const DEFAULT_COLOR = "#9ca3af";
