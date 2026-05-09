@@ -99,9 +99,8 @@ export function SessionList({ currentSessionId, onSelect, onNew, refreshKey }: P
   }
 
   return (
-    <aside className="hidden lg:flex w-72 shrink-0 flex-col border-r border-zinc-900/80 overflow-hidden">
-      <div className="flex shrink-0 items-center justify-between border-b border-zinc-900/80 px-4 py-3">
-        <span className="text-xs uppercase tracking-wider text-zinc-500">chats</span>
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex shrink-0 items-center justify-end border-b border-zinc-900/80 px-4 py-2">
         <button
           onClick={onNew}
           className="flex h-6 w-6 items-center justify-center rounded text-zinc-400 transition hover:bg-zinc-900 hover:text-zinc-100"
@@ -192,6 +191,6 @@ export function SessionList({ currentSessionId, onSelect, onNew, refreshKey }: P
           </ul>
         )}
       </div>
-    </aside>
+    </div>
   );
 }

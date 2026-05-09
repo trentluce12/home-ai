@@ -1,12 +1,21 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { ArrowDown, ArrowUp, LogOut, Network, Square } from "lucide-react";
+import { ArrowDown, ArrowUp, LogOut, Square } from "lucide-react";
 import { MessageBubble } from "./components/MessageBubble";
 import { MemoryPanel } from "./components/MemoryPanel";
-import { SessionList } from "./components/SessionList";
+import { Sidebar } from "./components/Sidebar";
 import { EmptyDashboard } from "./components/EmptyDashboard";
 import { GraphView } from "./components/GraphView";
 import { Login } from "./components/Login";
-import { api, SERVER_URL, type Message, type MemoryEvent } from "./lib/api";
+import { ApprovalModal } from "./components/ApprovalModal";
+import { NotesSidebar } from "./components/NotesSidebar";
+import { NotesView } from "./components/NotesView";
+import {
+  api,
+  SERVER_URL,
+  type ApprovalRequest,
+  type Message,
+  type MemoryEvent,
+} from "./lib/api";
 
 const NEAR_BOTTOM_PX = 80;
 
@@ -44,6 +53,33 @@ export default function App() {
   return <ChatShell onLogout={() => setAuthState("anon")} />;
 }
 
+// Closed-state for the contextual memory panel persists per browser session
+// (sessionStorage), so once the user dismisses it via the X they aren't
+// nagged again on every chat-switch within the same tab. A new tab/window
+// re-opens with the panel back to default. Failures (Safari private mode,
+// disabled storage) silently fall back to "open."
+const MEMORY_CLOSED_STORAGE_KEY = "home-ai:memory-panel:closed";
+
+function loadMemoryPanelClosed(): boolean {
+  try {
+    return sessionStorage.getItem(MEMORY_CLOSED_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function saveMemoryPanelClosed(closed: boolean): void {
+  try {
+    if (closed) {
+      sessionStorage.setItem(MEMORY_CLOSED_STORAGE_KEY, "1");
+    } else {
+      sessionStorage.removeItem(MEMORY_CLOSED_STORAGE_KEY);
+    }
+  } catch {
+    // ignore — sessionStorage failures shouldn't break panel toggling
+  }
+}
+
 function ChatShell({ onLogout }: { onLogout: () => void }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [memoryEvents, setMemoryEvents] = useState<MemoryEvent[]>([]);
@@ -52,8 +88,48 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [graphOpen, setGraphOpen] = useState(false);
+  // M6 phase 4: `graphView` is the main panel's "Knowledge Graph" mode. When
+  // true, the inline `GraphView` fills the main panel (no chat input footer,
+  // no memory panel, no overlay). Mutually exclusive with `notesOpen` — the
+  // sidebar's `Notes` and `Knowledge Graph` buttons each own one of these
+  // boolean lanes, and selecting one tears down the other.
+  const [graphView, setGraphView] = useState(false);
+  const [memoryPanelClosed, setMemoryPanelClosed] = useState<boolean>(() =>
+    loadMemoryPanelClosed(),
+  );
+  // When the dashboard "notes" panel opens the graph, it passes the node ID
+  // so GraphView can focus + populate its detail panel automatically. Reset
+  // to null when leaving the graph so a subsequent open doesn't re-focus.
+  const [graphFocusNodeId, setGraphFocusNodeId] = useState<string | null>(null);
+  // Notes view state. `notesOpen` toggles the secondary sidebar + notes-context
+  // main-panel. `selectedNote` holds the row info for the currently-selected
+  // note (null = notes-context dashboard variant). The row carries the display
+  // name so `NotesView` can render its header without a second fetch — the
+  // secondary sidebar already lists `KgNoteListEntry`s with name + type.
+  const [notesOpen, setNotesOpen] = useState(false);
+  const [selectedNote, setSelectedNote] = useState<{
+    nodeId: string;
+    name: string;
+    // `initialMode` is set to "split" by the inline-create flow and the
+    // graph's `Edit note` button (M6 phase 4), so the user lands in the
+    // editor with the textarea focused. Normal row-clicks omit it (the
+    // field stays absent), which `NotesView` interprets as the default
+    // `preview`.
+    initialMode?: "preview" | "split";
+  } | null>(null);
+  // M6 phase 4: `expandToNote` is an external command for `NotesSidebar` to
+  // walk up a note's folder ancestor chain and add every folder on the path
+  // to its `expanded` set. Wired by the graph's `Edit note` flow so the
+  // freshly-selected note is visible in the tree on arrival. The `token`
+  // increments on every dispatch so re-clicking `Edit note` on the same
+  // note re-fires the expansion (the sidebar's effect keys on token, not
+  // nodeId, so identical-id dispatches don't get deduped).
+  const [expandToNote, setExpandToNote] = useState<{
+    nodeId: string;
+    token: number;
+  } | null>(null);
   const [showJumpPill, setShowJumpPill] = useState(false);
+  const [approvalRequest, setApprovalRequest] = useState<ApprovalRequest | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -105,6 +181,14 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
     setSessionId(null);
     setError(null);
     setInput("");
+    setApprovalRequest(null);
+    // Tear down the notes / graph views if either was open — opening (or
+    // new-chatting) returns the user to the chat surface.
+    setNotesOpen(false);
+    setSelectedNote(null);
+    setExpandToNote(null);
+    setGraphView(false);
+    setGraphFocusNodeId(null);
     stickToBottomRef.current = true;
     setShowJumpPill(false);
   }
@@ -117,11 +201,101 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
       const history = await api.sessionHistory(id);
       setMessages(history);
       setSessionId(id);
+      // Selecting a chat tears down the notes / graph views (memory panel
+      // re-opens contextually as part of the active-chat layout).
+      setNotesOpen(false);
+      setSelectedNote(null);
+      setExpandToNote(null);
+      setGraphView(false);
+      setGraphFocusNodeId(null);
       stickToBottomRef.current = true;
       setShowJumpPill(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  function handleToggleNotes() {
+    setNotesOpen((curr) => {
+      if (curr) {
+        // Closing — also clear the selected note so re-opening lands on
+        // the notes-context dashboard (consistent with re-clicking `Notes`
+        // = "back to the notes home"), and clear any pending
+        // expand-to-note command so a re-open doesn't replay a stale
+        // expansion from the last graph → Edit-note hop.
+        setSelectedNote(null);
+        setExpandToNote(null);
+        return false;
+      }
+      // Opening Notes tears down the graph view if it was up; the two
+      // surfaces are mutually exclusive.
+      setGraphView(false);
+      setGraphFocusNodeId(null);
+      return true;
+    });
+  }
+
+  // Open the inline graph view (M6 phase 4). Optionally accepts a node id
+  // to focus on arrival — passed by the dashboard's `Notes` panel; null
+  // when the user clicks `Knowledge Graph` in the sidebar. Tears down the
+  // notes view since the two main-panel surfaces are mutually exclusive.
+  function handleOpenGraph(focusNodeId: string | null = null) {
+    setNotesOpen(false);
+    setSelectedNote(null);
+    setExpandToNote(null);
+    setGraphFocusNodeId(focusNodeId);
+    setGraphView(true);
+  }
+
+  // M6 phase 4: invoked by the graph's per-node `Edit note` button. The
+  // user clicks the button in the detail panel; we tear down the graph,
+  // open the notes view in split-edit mode for the matching note, and
+  // dispatch an `expandToNote` command so the secondary sidebar walks up
+  // the note's folder ancestor chain. `name` is the underlying node's
+  // display label, used as a flash-free title bridge — `NotesView`'s
+  // GET overrides it with the canonical `node_notes.name` once the
+  // round-trip resolves.
+  function handleEditNote(nodeId: string, name: string) {
+    setGraphView(false);
+    setGraphFocusNodeId(null);
+    setNotesOpen(true);
+    setSelectedNote({ nodeId, name, initialMode: "split" });
+    setExpandToNote((prev) => ({ nodeId, token: (prev?.token ?? 0) + 1 }));
+  }
+
+  function handleSelectNote(nodeId: string, name: string) {
+    setSelectedNote({ nodeId, name });
+  }
+
+  // Called by `NotesSidebar` when the inline-create flow successfully commits.
+  // We bump `refreshKey` so the sidebar re-fetches with the new row in its
+  // canonical place, then select the new note in `split` mode so the user
+  // lands in the editor with the textarea focused, ready to type the body.
+  function handleCreateNote(nodeId: string, name: string) {
+    setRefreshKey((k) => k + 1);
+    setSelectedNote({ nodeId, name, initialMode: "split" });
+  }
+
+  // M6 phase 3: invoked after the right-click `Rename` flow on a note row
+  // commits. Update the in-memory `selectedNote.name` if the renamed note
+  // is the one currently open in the main panel (otherwise the header
+  // would render the stale label until the user clicks something else).
+  // Also bump `refreshKey` so the dashboard's recent-notes panel and any
+  // other surface depending on note metadata picks up the new label.
+  function handleNoteRenamed(nodeId: string, newName: string) {
+    setRefreshKey((k) => k + 1);
+    setSelectedNote((curr) =>
+      curr && curr.nodeId === nodeId ? { ...curr, name: newName } : curr,
+    );
+  }
+
+  // M6 phase 3: invoked after the right-click `Delete` flow on a note row
+  // commits (or after a folder cascade-delete that included the active note).
+  // Clear `selectedNote` if it matches so the main panel falls back to the
+  // notes-context dashboard rather than rendering against a now-deleted node.
+  function handleNoteDeleted(nodeId: string) {
+    setRefreshKey((k) => k + 1);
+    setSelectedNote((curr) => (curr && curr.nodeId === nodeId ? null : curr));
   }
 
   function stop() {
@@ -230,6 +404,18 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
           },
         ]);
         break;
+      case "approval_request": {
+        const requestId = payload.requestId;
+        const kind = payload.kind;
+        if (typeof requestId === "string" && typeof kind === "string") {
+          setApprovalRequest({
+            requestId,
+            kind,
+            payload: payload.payload,
+          });
+        }
+        break;
+      }
       case "done": {
         const usage =
           (payload.usage as
@@ -267,6 +453,14 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
     }
   }
 
+  function handleToggleMemoryPanel() {
+    setMemoryPanelClosed((prev) => {
+      const next = !prev;
+      saveMemoryPanelClosed(next);
+      return next;
+    });
+  }
+
   async function handleLogout() {
     if (streaming) abortRef.current?.abort();
     try {
@@ -293,14 +487,6 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
             <span className="text-xs text-zinc-500 animate-pulse">thinking…</span>
           )}
           <button
-            onClick={() => setGraphOpen(true)}
-            aria-label="open memory graph"
-            title="Memory graph"
-            className="flex h-7 w-7 items-center justify-center rounded text-zinc-400 transition hover:bg-zinc-900 hover:text-zinc-100"
-          >
-            <Network className="h-3.5 w-3.5" />
-          </button>
-          <button
             onClick={handleLogout}
             aria-label="log out"
             title="Log out"
@@ -312,98 +498,158 @@ function ChatShell({ onLogout }: { onLogout: () => void }) {
       </header>
 
       <div className="flex flex-1 min-h-0 overflow-hidden">
-        <SessionList
+        <Sidebar
           currentSessionId={sessionId}
-          onSelect={handleSelectSession}
-          onNew={handleNewChat}
+          onSelectSession={handleSelectSession}
+          onNewChat={handleNewChat}
           refreshKey={refreshKey}
+          onOpenGraph={() => handleOpenGraph(null)}
+          onOpenNotes={handleToggleNotes}
         />
 
-        <main
-          ref={scrollRef}
-          onScroll={onScroll}
-          className="relative flex-1 overflow-y-auto"
-        >
-          <div className="mx-auto flex h-full max-w-2xl flex-col px-6 py-10">
-            {empty ? (
-              <EmptyDashboard
-                refreshKey={refreshKey}
-                onChange={() => setRefreshKey((k) => k + 1)}
-              />
+        {notesOpen && (
+          <NotesSidebar
+            selectedNoteId={selectedNote?.nodeId ?? null}
+            onSelectNote={handleSelectNote}
+            onCreateNote={handleCreateNote}
+            onNoteRenamed={handleNoteRenamed}
+            onNoteDeleted={handleNoteDeleted}
+            onClose={handleToggleNotes}
+            refreshKey={refreshKey}
+            expandToNote={expandToNote}
+          />
+        )}
+
+        {graphView ? (
+          // M6 phase 4: inline `GraphView` as the main panel — no overlay,
+          // no chat input, no memory panel. `key` on `refreshKey` forces a
+          // teardown + remount when the underlying data may have changed
+          // (chat finished, fact recorded). `GraphView`'s own cleanup runs
+          // on unmount so leaving the view kills its Sigma worker cleanly.
+          <main className="relative flex-1 overflow-hidden">
+            <GraphView
+              refreshKey={refreshKey}
+              initialNodeId={graphFocusNodeId}
+              onEditNote={handleEditNote}
+            />
+          </main>
+        ) : (
+          <main
+            ref={scrollRef}
+            onScroll={onScroll}
+            className="relative flex-1 overflow-y-auto"
+          >
+            {notesOpen ? (
+              selectedNote ? (
+                <NotesView
+                  key={selectedNote.nodeId}
+                  nodeId={selectedNote.nodeId}
+                  title={selectedNote.name}
+                  initialMode={selectedNote.initialMode}
+                  onChange={() => setRefreshKey((k) => k + 1)}
+                />
+              ) : (
+                <div className="mx-auto flex h-full max-w-2xl flex-col px-6 py-10">
+                  <EmptyDashboard
+                    variant="notes"
+                    refreshKey={refreshKey}
+                    onChange={() => setRefreshKey((k) => k + 1)}
+                    onOpenNode={(id) => handleOpenGraph(id)}
+                  />
+                </div>
+              )
             ) : (
-              <div className="flex flex-col gap-6">
-                {messages.map((m, i) => (
-                  <MessageBubble key={i} message={m} />
-                ))}
-                {error && (
-                  <div className="rounded-lg border border-red-900/60 bg-red-950/30 px-4 py-2.5 text-sm text-red-300 animate-fade-in">
-                    {error}
+              <div className="mx-auto flex h-full max-w-2xl flex-col px-6 py-10">
+                {empty ? (
+                  <EmptyDashboard
+                    refreshKey={refreshKey}
+                    onChange={() => setRefreshKey((k) => k + 1)}
+                    onOpenNode={(id) => handleOpenGraph(id)}
+                  />
+                ) : (
+                  <div className="flex flex-col gap-6">
+                    {messages.map((m, i) => (
+                      <MessageBubble key={i} message={m} />
+                    ))}
+                    {error && (
+                      <div className="rounded-lg border border-red-900/60 bg-red-950/30 px-4 py-2.5 text-sm text-red-300 animate-fade-in">
+                        {error}
+                      </div>
+                    )}
+                    <div ref={bottomRef} />
                   </div>
                 )}
-                <div ref={bottomRef} />
               </div>
             )}
-          </div>
-          {showJumpPill && !empty && (
-            <button
-              onClick={jumpToLatest}
-              aria-label="jump to latest"
-              className="sticky bottom-4 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-zinc-800 bg-zinc-900/90 px-3 py-1.5 text-xs text-zinc-300 shadow-lg backdrop-blur transition hover:border-zinc-700 hover:bg-zinc-900"
-            >
-              <ArrowDown className="h-3 w-3" />
-              jump to latest
-            </button>
-          )}
-        </main>
-
-        <MemoryPanel events={memoryEvents} />
-      </div>
-
-      <footer className="shrink-0 border-t border-zinc-900/80 px-6 py-4">
-        <div className="mx-auto max-w-2xl">
-          <div className="relative flex items-end gap-2 rounded-2xl border border-zinc-800 bg-zinc-900/60 px-4 py-3 backdrop-blur transition-colors focus-within:border-zinc-700 focus-within:bg-zinc-900">
-            <textarea
-              ref={textareaRef}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={onKeyDown}
-              placeholder="message home-ai…"
-              rows={1}
-              className="flex-1 resize-none bg-transparent text-zinc-100 placeholder:text-zinc-600 focus:outline-none"
-            />
-            {streaming ? (
+            {showJumpPill && !empty && !notesOpen && (
               <button
-                onClick={stop}
-                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-zinc-100 text-zinc-900 transition hover:bg-white"
-                aria-label="stop"
-                title="Stop"
+                onClick={jumpToLatest}
+                aria-label="jump to latest"
+                className="sticky bottom-4 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-zinc-800 bg-zinc-900/90 px-3 py-1.5 text-xs text-zinc-300 shadow-lg backdrop-blur transition hover:border-zinc-700 hover:bg-zinc-900"
               >
-                <Square className="h-3.5 w-3.5" strokeWidth={2.5} fill="currentColor" />
-              </button>
-            ) : (
-              <button
-                onClick={send}
-                disabled={!input.trim()}
-                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-zinc-100 text-zinc-900 transition hover:bg-white disabled:bg-zinc-800 disabled:text-zinc-600"
-                aria-label="send"
-              >
-                <ArrowUp className="h-4 w-4" strokeWidth={2.5} />
+                <ArrowDown className="h-3 w-3" />
+                jump to latest
               </button>
             )}
-          </div>
-          <p className="mt-2 text-center text-xs text-zinc-600">
-            {streaming
-              ? "click stop to interrupt"
-              : "enter to send · shift + enter for newline"}
-          </p>
-        </div>
-      </footer>
+          </main>
+        )}
 
-      <GraphView
-        open={graphOpen}
-        onClose={() => setGraphOpen(false)}
-        refreshKey={refreshKey}
-      />
+        <MemoryPanel
+          events={memoryEvents}
+          visible={!empty && !notesOpen && !graphView}
+          collapsed={memoryPanelClosed}
+          onToggleCollapse={handleToggleMemoryPanel}
+        />
+      </div>
+
+      {!notesOpen && !graphView && (
+        <footer className="shrink-0 border-t border-zinc-900/80 px-6 py-4">
+          <div className="mx-auto max-w-2xl">
+            <div className="relative flex items-end gap-2 rounded-2xl border border-zinc-800 bg-zinc-900/60 px-4 py-3 backdrop-blur transition-colors focus-within:border-zinc-700 focus-within:bg-zinc-900">
+              <textarea
+                ref={textareaRef}
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={onKeyDown}
+                placeholder="message home-ai…"
+                rows={1}
+                className="flex-1 resize-none bg-transparent text-zinc-100 placeholder:text-zinc-600 focus:outline-none"
+              />
+              {streaming ? (
+                <button
+                  onClick={stop}
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-zinc-100 text-zinc-900 transition hover:bg-white"
+                  aria-label="stop"
+                  title="Stop"
+                >
+                  <Square className="h-3.5 w-3.5" strokeWidth={2.5} fill="currentColor" />
+                </button>
+              ) : (
+                <button
+                  onClick={send}
+                  disabled={!input.trim()}
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-zinc-100 text-zinc-900 transition hover:bg-white disabled:bg-zinc-800 disabled:text-zinc-600"
+                  aria-label="send"
+                >
+                  <ArrowUp className="h-4 w-4" strokeWidth={2.5} />
+                </button>
+              )}
+            </div>
+            <p className="mt-2 text-center text-xs text-zinc-600">
+              {streaming
+                ? "click stop to interrupt"
+                : "enter to send · shift + enter for newline"}
+            </p>
+          </div>
+        </footer>
+      )}
+
+      {approvalRequest && (
+        <ApprovalModal
+          request={approvalRequest}
+          onResolved={() => setApprovalRequest(null)}
+        />
+      )}
     </div>
   );
 }

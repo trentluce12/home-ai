@@ -22,6 +22,12 @@ import { cleanupSessions } from "./sessions/cleanup.js";
 import { db } from "./kg/db.js";
 import { authRoutes } from "./routes/auth.js";
 import { requireAuth } from "./auth/middleware.js";
+import {
+  cancelApprovalsForStream,
+  resolveApproval,
+  withApprovalContext,
+  type ApprovalDecision,
+} from "./approval.js";
 
 // Load .env from the project root (one level above server/)
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -82,6 +88,36 @@ EDGE TYPES (the \`type\` field on edges): KNOWS, LIVES_WITH, WORKS_AT, OWNS, LOC
 THE USER'S NODE: A node with name "user" and type Person represents the user themselves. Most facts they share are about themselves, so most edges go from "user" → something. Create the user node on demand if it doesn't exist (the recording tools handle this).
 
 PASSIVE CONTEXT: Before each user turn, relevant facts from your KG are auto-injected as a <context> block before the user's message. Trust this context as the current state of memory and answer from it directly when it covers the question — no tool call needed. Only reach for \`search\` if the context block looks insufficient.
+
+NODE NOTES: Some nodes carry a free-form markdown note alongside the structured edges. When a retrieved node has one, the context block shows a ~200-char preview as a \`note (<name>): …\` line. The preview is enough most of the time — answer from it directly. Reach for \`mcp__kg__get_node_note\` (passing the node id) ONLY when the preview cuts off mid-sentence on a topic the user just asked about, or when the user is clearly asking for detail that's past the preview boundary. A trailing \`…\` in the preview signals truncation; no marker means the full body was already shown.
+
+EDITING NODE NOTES: Use \`mcp__kg__propose_note_edit(nodeId, newBody, reason)\` when the user shares context that updates an existing note (e.g., they just corrected a stale fact, added detail, or — during a chat that touches multiple related nodes — gave you info that would consolidate overlapping passages in a note you already have). The user sees a before/after diff in a modal; nothing is written until they approve. Rules:
+
+- Pass the COMPLETE new markdown body, not a diff or patch — the body replaces the existing one verbatim.
+- Read the current body first via \`mcp__kg__get_node_note\` if the preview alone doesn't tell you what to preserve. Don't propose an edit blind.
+- Keep edits minimal and targeted. Preserve the rest of the note's voice and structure unless the user asked for a rewrite.
+- The \`reason\` field is one short sentence the user reads in the diff header — make it specific ("updated age from 4 to 5", not "minor update").
+- Three possible responses come back:
+  - \`applied …\` — saved. Acknowledge briefly and move on.
+  - \`denied by user\` — note unchanged. Don't re-propose the same edit; pivot or ask what to change.
+  - \`{"decision":"tweak","tweakText":"…"}\` — the user wants an adjustment. Read \`tweakText\`, integrate the guidance, and call \`propose_note_edit\` again with a tightened body. Don't loop forever — if the user denies a second proposal too, ask them to clarify in chat.
+  - \`approval timed out …\` — assume the user stepped away. Don't auto-retry; surface that the proposal expired.
+- Don't propose an edit when (a) there's no existing note (use the manual editor — agent-creating empty notes is out of scope), (b) the change is trivially wording-only and the user didn't ask for it, or (c) you're uncertain about what should change. When in doubt, ask the user before proposing.
+
+MERGING DUPLICATE NODES: Use \`mcp__kg__propose_node_merge(sourceIds, target)\` when you spot semantic duplicates — different node entries that clearly refer to the same thing (e.g. \`Topic:react\` and \`Topic:React\`, \`Person:John\` and \`Person:John_Doe\`, \`Pet:snickers\` and \`Pet:Snickers\`). Most natural triggers: (a) the user explicitly asks to consolidate ("clean up the duplicate React topics"), or (b) you observe duplicates surface side-by-side in the auto-injected <context> block or in a \`search\`/\`recent\` result during a chat. The user sees the source nodes (with their edges) and the proposed unified target in a modal; nothing changes until they approve. Rules:
+
+- \`sourceIds\` is the list of duplicates to absorb (each is a node id starting with \`node_\`). The target consolidates all of them.
+- \`target.name\` and \`target.type\` form the canonical identity. If a node with that (name, type) already exists and isn't a source, the merge folds into it; otherwise a fresh node is minted.
+- \`target.body\` is the FULL unified markdown note for the consolidated node. Read each source's note body first (via \`get_node_note\`) when the previews don't tell you enough to merge them losslessly. Pass an empty string if none of the sources had notes worth keeping.
+- \`target.reason\` is one short sentence explaining why these are duplicates — what the user reads in the modal header. Be specific ("same React topic with different casing", not "duplicates").
+- Be conservative. Same-name + same-type doesn't always mean same entity (two real people named John, two distinct projects named "Migration"). When the duplication isn't obvious, ask the user first.
+- Approve flow drops all source nodes and rewrites their edges (deduped against existing target edges by (other_end, edge_type); self-loops dropped). Source notes are gone after approve — \`target.body\` is the only surviving body.
+- Three possible responses come back:
+  - \`applied — merged N sources into …\` — saved. Acknowledge briefly with the new node's name and id.
+  - \`denied by user\` — nothing changed; both source nodes still exist. Don't re-propose the same merge.
+  - \`{"decision":"tweak","tweakText":"…"}\` — the user wants an adjustment (often a rename, e.g. "call it 'React' with a capital R" or a tweak to the body). Read \`tweakText\` and call \`propose_node_merge\` again with the adjustment integrated.
+  - \`approval timed out …\` — assume the user stepped away. Don't auto-retry.
+- Don't propose a merge when (a) you only have a single candidate, (b) the nodes have different types (those are different kinds of entities by definition), or (c) you're guessing — duplicates are usually obvious from name + edge overlap.
 
 RECORDING FACTS — two distinct tools:
 
@@ -148,6 +184,17 @@ app.post("/api/chat", async (c) => {
   const prompt = wrapWithContext(userText, subgraph.formatted);
 
   return streamSSE(c, async (stream) => {
+    // If the tab closes mid-turn (or the user hits Stop), reject every pending
+    // approval owned by this stream so the agent loop unwinds rather than
+    // dangling on a Promise that will never settle. The 5-min timeout in
+    // `approval.ts` is the safety net; this is the prompt path.
+    stream.onAbort(() => {
+      const cancelled = cancelApprovalsForStream(stream);
+      if (cancelled > 0) {
+        console.log(`[approval] stream aborted, cancelled ${cancelled} pending`);
+      }
+    });
+
     if (subgraph.summary.edgeCount > 0 || subgraph.summary.nodeCount > 0) {
       await stream.writeSSE({
         data: JSON.stringify({
@@ -159,115 +206,155 @@ app.post("/api/chat", async (c) => {
     }
 
     try {
-      for await (const message of query({
-        prompt,
-        options: {
-          model: "claude-opus-4-7",
-          cwd: PROJECT_DIR,
-          sessionStore: sqliteSessionStore,
-          systemPrompt: SYSTEM_PROMPT,
-          permissionMode: "bypassPermissions",
-          mcpServers: { kg: kgServer },
-          allowedTools: ALLOWED_TOOLS,
-          includePartialMessages: true,
-          ...(body.sessionId ? { resume: body.sessionId } : {}),
-        },
-      })) {
-        const m = message as Record<string, unknown> & { type: string };
+      await withApprovalContext(stream, async () => {
+        for await (const message of query({
+          prompt,
+          options: {
+            model: "claude-opus-4-7",
+            cwd: PROJECT_DIR,
+            sessionStore: sqliteSessionStore,
+            systemPrompt: SYSTEM_PROMPT,
+            permissionMode: "bypassPermissions",
+            mcpServers: { kg: kgServer },
+            allowedTools: ALLOWED_TOOLS,
+            includePartialMessages: true,
+            ...(body.sessionId ? { resume: body.sessionId } : {}),
+          },
+        })) {
+          const m = message as Record<string, unknown> & { type: string };
 
-        switch (m.type) {
-          case "system": {
-            if (m.subtype === "init" && typeof m.session_id === "string") {
-              await stream.writeSSE({
-                data: JSON.stringify({ type: "session", id: m.session_id }),
-              });
-            }
-            break;
-          }
-          case "stream_event": {
-            // Token-by-token text. Tool_use input deltas are skipped here —
-            // the final assistant message carries complete tool_use blocks.
-            const ev = m.event as
-              | {
-                  type: string;
-                  delta?: { type: string; text?: string };
-                }
-              | undefined;
-            if (
-              ev?.type === "content_block_delta" &&
-              ev.delta?.type === "text_delta" &&
-              typeof ev.delta.text === "string"
-            ) {
-              await stream.writeSSE({
-                data: JSON.stringify({ type: "text", delta: ev.delta.text }),
-              });
-            }
-            break;
-          }
-          case "assistant": {
-            // Text already streamed via stream_event above. Forward tool_use
-            // blocks for the sidebar.
-            const inner = m.message as { content?: unknown[] } | undefined;
-            const content = inner?.content ?? [];
-            for (const blockRaw of content) {
-              const block = blockRaw as Record<string, unknown> & { type: string };
-              if (block.type === "tool_use") {
+          switch (m.type) {
+            case "system": {
+              if (m.subtype === "init" && typeof m.session_id === "string") {
                 await stream.writeSSE({
-                  data: JSON.stringify({
-                    type: "tool_use",
-                    id: block.id,
-                    name: block.name,
-                    input: block.input,
-                  }),
+                  data: JSON.stringify({ type: "session", id: m.session_id }),
                 });
               }
+              break;
             }
-            break;
-          }
-          case "result": {
-            const usage = m.usage as
-              | {
-                  input_tokens?: number;
-                  output_tokens?: number;
-                  cache_creation_input_tokens?: number;
-                  cache_read_input_tokens?: number;
+            case "stream_event": {
+              // Token-by-token text. Tool_use input deltas are skipped here —
+              // the final assistant message carries complete tool_use blocks.
+              const ev = m.event as
+                | {
+                    type: string;
+                    delta?: { type: string; text?: string };
+                  }
+                | undefined;
+              if (
+                ev?.type === "content_block_delta" &&
+                ev.delta?.type === "text_delta" &&
+                typeof ev.delta.text === "string"
+              ) {
+                await stream.writeSSE({
+                  data: JSON.stringify({ type: "text", delta: ev.delta.text }),
+                });
+              }
+              break;
+            }
+            case "assistant": {
+              // Text already streamed via stream_event above. Forward tool_use
+              // blocks for the sidebar.
+              const inner = m.message as { content?: unknown[] } | undefined;
+              const content = inner?.content ?? [];
+              for (const blockRaw of content) {
+                const block = blockRaw as Record<string, unknown> & { type: string };
+                if (block.type === "tool_use") {
+                  await stream.writeSSE({
+                    data: JSON.stringify({
+                      type: "tool_use",
+                      id: block.id,
+                      name: block.name,
+                      input: block.input,
+                    }),
+                  });
                 }
-              | undefined;
-            if (usage) {
-              const created = usage.cache_creation_input_tokens ?? 0;
-              const read = usage.cache_read_input_tokens ?? 0;
-              const input = usage.input_tokens ?? 0;
-              const output = usage.output_tokens ?? 0;
-              console.log(
-                `[chat] tokens: in=${input} out=${output} cache_create=${created} cache_read=${read}`,
-              );
+              }
+              break;
             }
-            await stream.writeSSE({
-              data: JSON.stringify({
-                type: "done",
-                success: m.subtype === "success",
-                totalCostUsd: m.total_cost_usd,
-                usage,
-              }),
-            });
+            case "result": {
+              const usage = m.usage as
+                | {
+                    input_tokens?: number;
+                    output_tokens?: number;
+                    cache_creation_input_tokens?: number;
+                    cache_read_input_tokens?: number;
+                  }
+                | undefined;
+              if (usage) {
+                const created = usage.cache_creation_input_tokens ?? 0;
+                const read = usage.cache_read_input_tokens ?? 0;
+                const input = usage.input_tokens ?? 0;
+                const output = usage.output_tokens ?? 0;
+                console.log(
+                  `[chat] tokens: in=${input} out=${output} cache_create=${created} cache_read=${read}`,
+                );
+              }
+              await stream.writeSSE({
+                data: JSON.stringify({
+                  type: "done",
+                  success: m.subtype === "success",
+                  totalCostUsd: m.total_cost_usd,
+                  usage,
+                }),
+              });
 
-            // Smart title side-call (background, doesn't block stream).
-            const sid = typeof m.session_id === "string" ? m.session_id : null;
-            if (sid && m.subtype === "success") {
-              maybeSmartTitle(sid).catch((err) =>
-                console.warn("[smart-title]", err instanceof Error ? err.message : err),
-              );
+              // Smart title side-call (background, doesn't block stream).
+              const sid = typeof m.session_id === "string" ? m.session_id : null;
+              if (sid && m.subtype === "success") {
+                maybeSmartTitle(sid).catch((err) =>
+                  console.warn("[smart-title]", err instanceof Error ? err.message : err),
+                );
+              }
+              break;
             }
-            break;
           }
         }
-      }
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
       console.error("Chat error:", err);
       await stream.writeSSE({ data: JSON.stringify({ type: "error", message: msg }) });
     }
   });
+});
+
+// ───────── Approval responses ─────────
+//
+// Counterpart to the `approval_request` SSE event. The web client POSTs here
+// when the user clicks Approve / Deny / Tweak in the modal; we look up the
+// resolver by `requestId` and unblock the awaiting tool. 404 if the request
+// doesn't exist (already resolved, timed out, or fabricated id).
+
+interface ApprovalRequestBody {
+  decision?: unknown;
+  tweakText?: unknown;
+}
+
+app.post("/api/approval/:requestId", async (c) => {
+  const requestId = c.req.param("requestId");
+  const body = await c.req.json<ApprovalRequestBody>().catch(() => null);
+  if (!body) return c.json({ error: "invalid JSON" }, 400);
+
+  let response: ApprovalDecision;
+  if (body.decision === "approve") {
+    response = { decision: "approve" };
+  } else if (body.decision === "deny") {
+    response = { decision: "deny" };
+  } else if (body.decision === "tweak") {
+    if (typeof body.tweakText !== "string" || body.tweakText.trim().length === 0) {
+      return c.json({ error: "tweakText required for tweak decision" }, 400);
+    }
+    response = { decision: "tweak", tweakText: body.tweakText };
+  } else {
+    return c.json({ error: "decision must be approve | deny | tweak" }, 400);
+  }
+
+  const matched = resolveApproval(requestId, response);
+  if (!matched) {
+    return c.json({ error: "no pending approval for this id" }, 404);
+  }
+  return c.json({ ok: true });
 });
 
 // ───────── Smart titling ─────────
@@ -495,6 +582,352 @@ app.delete("/api/kg/node/:id", (c) => {
   const result = kg.deleteNode(id);
   if (!result.deleted) return c.json({ error: "Node not found" }, 404);
   return c.json(result);
+});
+
+// ───────── Node notes (M5 phase 1) ─────────
+//
+// 1:1 free-form markdown attached to a KG node. `node_notes` cascades on node
+// delete so `forget` cleans up automatically (no app-level cleanup needed).
+// PUT body is empty → treat as delete; the editor uses save-on-blur and an
+// empty body shouldn't leave an empty row behind.
+
+app.get("/api/kg/node/:id/note", (c) => {
+  const id = c.req.param("id");
+  if (!kg.getNode(id)) return c.json({ error: "Node not found" }, 404);
+  const note = kg.getNote(id);
+  return c.json({ note });
+});
+
+app.put("/api/kg/node/:id/note", async (c) => {
+  const id = c.req.param("id");
+  if (!kg.getNode(id)) return c.json({ error: "Node not found" }, 404);
+  const body = await c.req.json<{ body?: unknown; name?: unknown }>().catch(() => null);
+  if (!body || typeof body.body !== "string") {
+    return c.json({ error: "body (string) required" }, 400);
+  }
+  // Optional `name` (M6 phase 2): when present, sets the note's display label;
+  // when omitted, `setNote` preserves the existing value (or defaults to the
+  // node's name on insert). Reject empty strings — they're never useful and
+  // would let a caller wipe the label without a body change.
+  let name: string | undefined;
+  if (body.name !== undefined) {
+    if (typeof body.name !== "string" || body.name.trim().length === 0) {
+      return c.json({ error: "name must be a non-empty string when provided" }, 400);
+    }
+    name = body.name;
+  }
+  const trimmed = body.body.trim();
+  if (trimmed.length === 0) {
+    kg.deleteNote(id);
+    return c.json({ note: null });
+  }
+  const note = kg.setNote(id, body.body, name);
+  return c.json({ note });
+});
+
+// Rename-only endpoint (M6 phase 2) extended in phase 3 to also handle
+// move-to-folder. Body shape: `{name?: string, folderId?: number | null}`.
+// At least one field must be present; both can be supplied in one PATCH
+// (e.g. drop a renamed note into a different folder in a single round-trip).
+//
+// 404 when the note row doesn't exist — renaming/moving a non-existent
+// note is meaningless. FK violations on `folderId` (unknown folder id)
+// surface as a 400.
+app.patch("/api/kg/node/:id/note", async (c) => {
+  const id = c.req.param("id");
+  if (!kg.getNode(id)) return c.json({ error: "Node not found" }, 404);
+  const body = await c.req
+    .json<{ name?: unknown; folderId?: unknown }>()
+    .catch(() => null);
+  if (!body) return c.json({ error: "invalid JSON" }, 400);
+
+  let name: string | undefined;
+  if (body.name !== undefined) {
+    if (typeof body.name !== "string" || body.name.trim().length === 0) {
+      return c.json({ error: "name must be a non-empty string when provided" }, 400);
+    }
+    name = body.name;
+  }
+
+  let folderId: number | null | undefined;
+  if (body.folderId !== undefined) {
+    if (body.folderId === null) {
+      folderId = null;
+    } else if (typeof body.folderId === "number" && Number.isInteger(body.folderId)) {
+      folderId = body.folderId;
+    } else {
+      return c.json({ error: "folderId must be an integer or null when provided" }, 400);
+    }
+  }
+
+  if (name === undefined && folderId === undefined) {
+    return c.json({ error: "at least one of {name, folderId} required" }, 400);
+  }
+
+  let note: kg.NodeNote | null = null;
+  try {
+    if (name !== undefined) {
+      note = kg.renameNote(id, name);
+      if (!note) return c.json({ error: "Note not found" }, 404);
+    }
+    if (folderId !== undefined) {
+      note = kg.moveNote(id, folderId);
+      if (!note) return c.json({ error: "Note not found" }, 404);
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Unknown error";
+    return c.json({ error: `note update failed: ${msg}` }, 400);
+  }
+  return c.json({ note });
+});
+
+app.delete("/api/kg/node/:id/note", (c) => {
+  const id = c.req.param("id");
+  if (!kg.getNode(id)) return c.json({ error: "Node not found" }, 404);
+  const result = kg.deleteNote(id);
+  return c.json(result);
+});
+
+// ───────── Folders (M6 phase 3) ─────────
+//
+// Pure UI organization layer over notes — no edges, no embeddings, no
+// provenance, opaque to the agent. Tree expansion state persists per-user
+// in localStorage on the client; no server table for that.
+//
+// Wire shape:
+// - GET    /api/kg/folders              — flat list (client builds the tree)
+// - POST   /api/kg/folders              — { name, parentId? } → folder
+// - PATCH  /api/kg/folders/:id          — { name?, parentId? } (rename / move)
+// - DELETE /api/kg/folders/:id?mode=…   — mode in { unfile (default), cascade }
+
+app.get("/api/kg/folders", (c) => {
+  return c.json(kg.listFolders());
+});
+
+app.post("/api/kg/folders", async (c) => {
+  const body = await c.req
+    .json<{ name?: unknown; parentId?: unknown; sortOrder?: unknown }>()
+    .catch(() => null);
+  if (!body) return c.json({ error: "invalid JSON" }, 400);
+
+  const name = typeof body.name === "string" ? body.name.trim() : "";
+  if (!name) {
+    return c.json({ error: "name (non-empty string) required" }, 400);
+  }
+
+  let parentId: number | null = null;
+  if (body.parentId !== undefined && body.parentId !== null) {
+    if (typeof body.parentId !== "number" || !Number.isInteger(body.parentId)) {
+      return c.json({ error: "parentId must be an integer or null when provided" }, 400);
+    }
+    parentId = body.parentId;
+  }
+
+  let sortOrder: number | undefined;
+  if (body.sortOrder !== undefined) {
+    if (typeof body.sortOrder !== "number" || !Number.isInteger(body.sortOrder)) {
+      return c.json({ error: "sortOrder must be an integer when provided" }, 400);
+    }
+    sortOrder = body.sortOrder;
+  }
+
+  let folder: kg.NoteFolder;
+  try {
+    folder = kg.createFolder({ name, parentId, sortOrder });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Unknown error";
+    // SQLite UNIQUE violations come through as `SQLITE_CONSTRAINT_UNIQUE`
+    // with message `UNIQUE constraint failed: …`. Treat as 409 so the
+    // client can show a friendly "name already taken" toast.
+    const status = msg.includes("UNIQUE constraint failed") ? 409 : 400;
+    return c.json({ error: `folder create failed: ${msg}` }, status);
+  }
+  return c.json(folder);
+});
+
+app.patch("/api/kg/folders/:id", async (c) => {
+  const idParam = c.req.param("id");
+  const id = Number(idParam);
+  if (!Number.isInteger(id)) return c.json({ error: "invalid folder id" }, 400);
+  const body = await c.req
+    .json<{ name?: unknown; parentId?: unknown }>()
+    .catch(() => null);
+  if (!body) return c.json({ error: "invalid JSON" }, 400);
+
+  let name: string | undefined;
+  if (body.name !== undefined) {
+    if (typeof body.name !== "string" || body.name.trim().length === 0) {
+      return c.json({ error: "name must be a non-empty string when provided" }, 400);
+    }
+    name = body.name;
+  }
+
+  let parentId: number | null | undefined;
+  if (body.parentId !== undefined) {
+    if (body.parentId === null) {
+      parentId = null;
+    } else if (typeof body.parentId === "number" && Number.isInteger(body.parentId)) {
+      parentId = body.parentId;
+    } else {
+      return c.json({ error: "parentId must be an integer or null when provided" }, 400);
+    }
+  }
+
+  if (name === undefined && parentId === undefined) {
+    return c.json({ error: "at least one of {name, parentId} required" }, 400);
+  }
+
+  let folder: kg.NoteFolder | null = null;
+  try {
+    if (name !== undefined) {
+      folder = kg.renameFolder(id, name);
+      if (!folder) return c.json({ error: "Folder not found" }, 404);
+    }
+    if (parentId !== undefined) {
+      folder = kg.moveFolder(id, parentId);
+      if (!folder) return c.json({ error: "Folder not found" }, 404);
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Unknown error";
+    const status = msg.includes("UNIQUE constraint failed") ? 409 : 400;
+    return c.json({ error: `folder update failed: ${msg}` }, status);
+  }
+  return c.json(folder);
+});
+
+app.delete("/api/kg/folders/:id", (c) => {
+  const idParam = c.req.param("id");
+  const id = Number(idParam);
+  if (!Number.isInteger(id)) return c.json({ error: "invalid folder id" }, 400);
+  const modeParam = c.req.query("mode") ?? "unfile";
+  if (modeParam !== "unfile" && modeParam !== "cascade") {
+    return c.json({ error: "mode must be 'unfile' or 'cascade'" }, 400);
+  }
+  const result = kg.deleteFolder(id, modeParam);
+  if (!result.deleted) return c.json({ error: "Folder not found" }, 404);
+  return c.json(result);
+});
+
+// Flat listing of every node with a non-empty note. Powers the dashboard
+// "notes" panel (M5 phase 1 — `m5p1-notes-panel`). Ordered by note recency
+// so freshly-written notes float to the top. Preview matches the retrieval
+// snippet: whitespace-collapsed, ~200 chars, ellipsis only when truncated.
+//
+// M6 phase 2: `name` is now sourced from `node_notes.name` (the note's own
+// display label), not the underlying node's name. The two were aliased by
+// the seed at first dev startup but drift independently as the user renames
+// notes.
+//
+// M6 phase 3: `folderId` is the (nullable) parent folder; the client uses
+// it to slot the note into the tree. NULL = unfiled root.
+const NOTES_PREVIEW_CHARS = 200;
+app.get("/api/kg/notes", (c) => {
+  const rows = db
+    .prepare(
+      `SELECT n.id as nodeId, nn.name as name, n.type as type,
+              nn.body as body, nn.updated_at as updatedAt,
+              nn.folder_id as folderId
+         FROM node_notes nn
+         JOIN nodes n ON n.id = nn.node_id
+        ORDER BY nn.updated_at DESC`,
+    )
+    .all() as {
+    nodeId: string;
+    name: string;
+    type: string;
+    body: string;
+    updatedAt: string;
+    folderId: number | null;
+  }[];
+  const entries = rows.map((r) => {
+    const collapsed = r.body.replace(/\s+/g, " ").trim();
+    const preview =
+      collapsed.length <= NOTES_PREVIEW_CHARS
+        ? collapsed
+        : collapsed.slice(0, NOTES_PREVIEW_CHARS).trimEnd() + "…";
+    return {
+      nodeId: r.nodeId,
+      name: r.name,
+      type: r.type,
+      preview,
+      updatedAt: r.updatedAt,
+      folderId: r.folderId,
+    };
+  });
+  return c.json(entries);
+});
+
+// Inline-create endpoint for the M6 phase 2 Notes sidebar `+` button. Body:
+// `{name, type?, body?, folderId?}`. Mints a node (default type `Generic`) +
+// a paired note row in a single transaction so there's no window where one
+// exists without the other. Returns the new note's `nodeId`/name/body/updatedAt
+// so the frontend can flip straight into split-edit mode without a follow-up
+// GET.
+//
+// M6 phase 3: `folderId` (integer | null) is now honored — when provided, the
+// new note is filed into that folder atomically. Invalid folder ids surface
+// as a 400 with the SQLite FK error.
+//
+// Embeddings happen in the background (fire-and-forget), same posture as
+// `record_user_fact` — the user's click-to-row-commit latency doesn't wait on
+// Voyage. Failure is non-fatal: FTS still works; hybrid retrieval skips the
+// cosine pass for unembedded nodes until a future re-embed run catches them.
+app.post("/api/kg/notes", async (c) => {
+  const body = await c.req
+    .json<{ name?: unknown; type?: unknown; body?: unknown; folderId?: unknown }>()
+    .catch(() => null);
+  if (!body) return c.json({ error: "invalid JSON" }, 400);
+
+  const name = typeof body.name === "string" ? body.name.trim() : "";
+  if (!name) {
+    return c.json({ error: "name (non-empty string) required" }, 400);
+  }
+
+  let type: string | undefined;
+  if (body.type !== undefined) {
+    if (typeof body.type !== "string" || body.type.trim().length === 0) {
+      return c.json({ error: "type must be a non-empty string when provided" }, 400);
+    }
+    type = body.type.trim();
+  }
+
+  let noteBody = "";
+  if (body.body !== undefined) {
+    if (typeof body.body !== "string") {
+      return c.json({ error: "body must be a string when provided" }, 400);
+    }
+    noteBody = body.body;
+  }
+
+  let folderId: number | null = null;
+  if (body.folderId !== undefined && body.folderId !== null) {
+    if (typeof body.folderId !== "number" || !Number.isInteger(body.folderId)) {
+      return c.json({ error: "folderId must be an integer or null when provided" }, 400);
+    }
+    folderId = body.folderId;
+  }
+
+  let result: { node: kg.Node; note: kg.NodeNote };
+  try {
+    result = kg.createNoteWithNode({ name, type, body: noteBody, folderId });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Unknown error";
+    return c.json({ error: `note create failed: ${msg}` }, 400);
+  }
+  const { node, note } = result;
+  kg.recordProvenance({ factId: node.id, factKind: "node", source: "user_statement" });
+
+  embedNodes([node]).catch((err) =>
+    console.warn("[notes-create] embedding failed:", err),
+  );
+
+  return c.json({
+    nodeId: note.nodeId,
+    name: note.name,
+    body: note.body,
+    updatedAt: note.updatedAt,
+    folderId: note.folderId,
+  });
 });
 
 app.get("/api/kg/graph", (c) => {

@@ -12,6 +12,129 @@ A personal AI: streaming chat UI on top of the Anthropic API. Knowledge graph co
 
 Newest first. Append entries; don't edit history.
 
+### 2026-05-03 · M6 — Knowledge sidebar (shipped)
+
+All four phases shipped on `dev-tl` in a single sequential run. Highlights from the implementation that diverged from or extended the original plan:
+
+**Note name decoupling carries asymmetric defaults.** Adding `node_notes.name` was the architectural hinge. `setNote(nodeId, body)` (no name) preserves the existing name on update and defaults to the node's name on first insert — so the existing `propose_note_edit` agent tool and the per-node detail editor stay body-only. Renames go through the new `PATCH /api/kg/node/:id/note` `{name}` route. Retrieval context (`server/src/kg/retrieve.ts`) intentionally still keys off the node's name (`Person:Alice`) for the "note (Alice): preview…" header, not the note's own name. The agent's anchor identity stays the node; the note name is a UI-surface concern.
+
+**Latent FK gap on existing `data/kg.sqlite` databases.** During phase 3 the implementer noticed `node_notes` lacked the `node_id → nodes(id) ON DELETE CASCADE` FK on the user's existing DB (PRAGMA foreign_key_list returned only the new `folder_id` FK). Fresh DBs declare the FK correctly via SCHEMA_SQL, but `CREATE TABLE IF NOT EXISTS` doesn't retrofit constraints on already-created tables. `m6p3-folder-schema`'s cascade-delete branch defensively `DELETE FROM node_notes WHERE node_id = ?` before calling `deleteNode(...)` so it works on both fresh and migrated DBs, but other paths (`forget`, `mergeNodes`'s remaining surfaces) may still leak orphan note rows on the legacy schema. A follow-up task in the spawned-task chip queue will repair the FK via the table-rebuild idiom (`CREATE TABLE node_notes_new AS ...` + copy + drop + rename).
+
+**`Generic` color slot.** Added `#52525b` (zinc-600) to GraphView's TYPE_COLORS palette, distinct from `Person` (zinc-400) and `Topic` (zinc-500) but in the same family — reads as the "neutral default" for inline-created notes that haven't been upgraded to a typed node yet. Filter chips iterate over `presentTypes` from live graph data, so `Generic` shows up automatically once any `Generic`-typed node exists.
+
+**Token-keyed `expandToNote` command.** The Edit-note button in the inline graph view's detail panel needs to drive the NotesSidebar from outside (expand the folder ancestor chain, select the note, switch to split-edit mode). Implemented as `{nodeId, token}` where the token increments per dispatch — NotesSidebar tracks `lastExpandToken` in a ref to fire the effect once per command rather than on every prop change. Clears to `null` when the user closes Notes so the command doesn't replay on a future Notes open.
+
+**Sidebar-section state, memory width, tree expansion all persist.** `home-ai:sidebar:section:<id>` (1/0), `home-ai:memory-panel:width` (px, clamped 224–384), `home-ai:notes-sidebar:expanded` (Set of folder ids serialized as JSON). Try/catch around all reads + writes (Safari private mode + disabled-storage safe). Memory close-state is sessionStorage (per-tab); everything else is localStorage (cross-tab).
+
+**Width-based slide animation, not transform-based.** Memory panel collapse/expand uses `transition-[width]` on the wrapper aside with `overflow-hidden` clipping the inner content. Reads as a wipe from the right edge while keeping the chat reflowing naturally. A `transform: translateX` overlay would have occluded the chat content during the slide — flagged as the canonical animation pattern for any future contextual side panels.
+
+### 2026-05-03 · M6 — Knowledge sidebar (planning entry — superseded by the shipped entry above)
+
+A layout + organization pass on top of M5. The motivating problem: notes are powerful but have no native browse surface — the only way to add or find one is to navigate to its node in the graph modal. Folders have no place in the structured KG, but as a UI organization layer over the user's notes, they're exactly what's missing. M6 introduces a `Knowledge` section in the left sidebar with two views — Notes (folder-tree-organized) and Knowledge Graph (the existing Sigma surface, demoted from header-modal to inline main-panel view).
+
+**Sidebar restructure.** Left sidebar gains two collapsible sections — `Agents` (the existing chat list moves here) and `Knowledge` (`Notes` / `Knowledge Graph` buttons). The header `Network` icon retires; the graph entry point lives in the sidebar.
+
+**Memory panel demoted.** The right-side memory panel is contextual: hidden by default, slides in when the user is viewing an active chat, dismissible (close button), resizable (drag handle), persists collapsed state across sessions. Reading room comes back when the user isn't actively chatting.
+
+**Notes view + secondary sidebar.** Selecting `Notes` slides a secondary sidebar out from the left edge of the primary nav, holding the folder tree. Tree mechanics mirror VSCode's explorer:
+
+- **Click** a folder → expand/collapse. Click a note → opens it in the main panel (preview-only).
+- **Right-click** menu, contextual to what was right-clicked:
+  - On a folder: `Add subfolder`, `Add note`, `Rename`, `Delete`.
+  - On a note: `Rename`, `Delete`.
+  - On empty space: `Add folder`, `Add note` (creates at root / unfiled).
+- **Drag-and-drop** moves notes between folders, re-nests folders, and drops to root for unfiled.
+- **Inline create** — new notes/folders appear with an editable `untitled` placeholder; user types the name and presses Enter to commit.
+- Top-level expanded by default; deeper levels collapsed; tree state persists across sessions.
+
+**Main-panel modes** — context-sensitive, depending on what's selected:
+
+- `Notes` active, no specific note → notes-context dashboard (recent notes panel + relevant widgets; the existing dashboard's `Notes` panel stays — it's the "recent" surface, the secondary sidebar is the "browse all" surface).
+- Specific note selected → preview-only render of the body. An `Edit` button on the preview switches to a split view: editor on the left, live preview on the right.
+- Active chat → chat UI; memory panel auto-opens to the right.
+- `Knowledge Graph` selected → graph view inline (no longer a modal).
+
+The empty-state dashboard's widget set is **context-sensitive**: notes-context emphasizes recent notes / note-related stats; agents-context (entered with no chat selected) keeps the kitchen-sink KG widgets (stats, recent nodes, forget, export, import).
+
+**Folder data model — pure UI layer.** New `note_folders(id, name, parent_id NULL FK self, sort_order INTEGER)` table; `node_notes` gains a `folder_id NULL FK` column (`NULL` = unfiled root). Folders carry no edges, no embeddings, no provenance — they're opaque to the agent (`propose_note_edit` doesn't see them; retrieval doesn't see them). Deleting a non-empty folder prompts: move-to-unfiled (default) or delete-contents. Notes never become collateral damage from a folder action unless the user explicitly chooses delete-contents.
+
+**Notes get a name independent of the underlying node.** Renaming a note in the tree does NOT rename the underlying node (and vice versa). `node_notes` gains a `name TEXT NOT NULL` column. Two human-facing labels exist:
+
+- The **note's own** `name` — shown in the tree, in the preview header, in the dashboard's recent-notes widget. Renamed via the tree's right-click `Rename`.
+- The **underlying node's** `name` — shown in the graph view and in the agent's retrieval context. Renamed via the graph-view detail panel or by an agent tool call.
+
+At creation time the two start in lockstep: if the user types `Birthday party 2026` to create a note inline, both the note and the new `Generic`-typed node get that name. They drift only if the user explicitly renames one independently. For notes created the existing way (open a node's detail panel, start typing the body), the note `name` defaults to the node's name.
+
+**`Generic` entity type.** New top-level type alongside `Person` / `Pet` / `Project` / `Topic` / `Organization` / `Place` / etc. Used as the default type when a user creates a note inline from the tree (no other typing context available). `Generic`-typed nodes show in the graph view by default — they're not filtered out — so newly-jotted notes are visible as part of the user's KG until upgraded. The user upgrades a `Generic` node's type from the graph-view detail panel when the note's subject is concrete enough to fit a real type.
+
+**Graph view becomes a main-panel view.** No more header modal. Selected from `Knowledge → Knowledge Graph`. The detail panel that opens when a node is clicked is bigger by default than the current modal version. The note section in the detail panel renders preview-only with an `Edit` button — clicking it navigates to the Notes view, expands the tree to the note's location, and opens it in split-edit mode. The graph and the chat can no longer be open simultaneously (the user flips between via the sidebar) — acceptable; the modal pattern was a quick hack and the inline pattern is cleaner.
+
+**Phase breakdown** (sequential — each phase ships independently):
+
+- **Phase 1 — layout reshuffle.** Sidebar gains `Agents` / `Knowledge` sections; memory panel demoted to contextual chat-only with slide-in + resize + collapse; header `Network` icon retires (graph entry moves to sidebar). The guts of Notes/Graph stay where they are — Notes is still attached per-node only, graph still has its current detail panel. Ships the new shell without changing how notes/graph work internally.
+- **Phase 2 — notes view + secondary sidebar (no folders yet).** Notes button shows the secondary sidebar with a flat list of all notes; preview-only mode with `Edit` → split editor/preview; VSCode-style inline note creation with `Generic` default type; `node_notes.name` column added (renames decoupled from node).
+- **Phase 3 — folder data model + CRUD.** `note_folders` table + `folder_id` column; right-click menu (Add subfolder / Add note / Rename / Delete); inline rename; drag-and-drop notes between folders and folders into folders; non-empty-delete prompt.
+- **Phase 4 — graph view as main panel.** Move graph from header-modal to inline main-panel view; bigger detail panel; preview-only note in detail panel + `Edit` button navigates to Notes view.
+
+### 2026-05-03 · M5 phase 3 — `propose_node_merge` shipped (M5 closed)
+
+Final M5 story. `mergeNodes(sourceIds, target)` in `server/src/kg/db.ts` runs in a single transaction: rewrite each source's outgoing/incoming edges to point at target with `(other_end, edge_type)` dedup, drop self-loops introduced by rewriting, migrate per-node provenance rows to target with `source_ref = "merged_from_<sourceId>"`, overwrite `node_notes(target.id)` verbatim with `target.body`, then delete source nodes (FK cascade clears their edges/embeddings/notes/remaining provenance). Re-embed target in the background — same posture as `record_user_fact`. The `mcp__kg__propose_node_merge(source_ids, target)` tool builds a `{kind:"node_merge", sources:[{node, edges, note}...], target}` payload and blocks on `requestApproval(...)`; the modal renders source cards (each with edge list + note preview) above a read-only target preview. Approve → `mergeNodes(...)`; Deny → no-op; Tweak → JSON-stringified `{decision:"tweak", tweakText}` so the agent can re-propose with the user's guidance.
+
+Two judgement calls worth pinning:
+
+**Target match resolution.** When `target.name`+`target.type` matches an *existing non-source* node, that node is reused as the merge target instead of minting a new one. Cleaner mental model: merging into a canonical node the user already has (`Topic:React`) is the common case when the agent proposes consolidating fuzzier duplicates (`Topic:react`, `Topic:reactjs`). When no non-source match exists, a fresh node is minted — even if a source happens to share the target name+type, since deleting+recreating the same id would be messy. `targetCreated: boolean` in the result distinguishes the two paths so callers can log differently.
+
+**Provenance `source_ref` is overwritten, not concatenated.** When migrating a source's per-node provenance row to the target, `source_ref` becomes `"merged_from_<sourceId>"` regardless of any prior value. If the source had a meaningful prior `source_ref`, it's lost. Multi-step merges (A→B then B→C) would otherwise produce nested concatenation strings that are gnarly to parse. The `merge_target(...)` provenance row appended to the target carries the explicit source list, so the high-level lineage stays recoverable; the per-edge prior-`source_ref` history is the casualty.
+
+System prompt gained a `MERGING DUPLICATE NODES` section: only propose for *genuine* duplicates (semantic + same-type), pick the canonical name (capitalized over lowercase, full over abbreviation), include a clear `reason`, ask the user before proposing if uncertainty is high. The phrasing leans conservative: false-merge cleanup is more painful than waiting another turn.
+
+M5 closed: notes baseline (phase 1) + approval modal infra and first consumer (phase 2) + node merge (phase 3). The approval modal now has two real payload-kind renderers (`note_edit`, `node_merge`); future tools (no concrete plans yet) can plug in via the same `kind`-keyed dispatch.
+
+### 2026-05-03 · M5 phase 2 — `propose_note_edit` shipped
+
+First real consumer of the approval modal. Agent calls `mcp__kg__propose_note_edit(nodeId, newBody, reason)`; the tool fetches the current body via `getNote`, builds a `{kind:"note_edit", node:{id,name,type}, before, after, reason}` payload, and blocks on `requestApproval(...)`. On approve it writes via `setNote` and returns `applied — note on … updated at …`. On deny it returns `denied by user`. On tweak it returns `{"decision":"tweak","tweakText":…}` (JSON-stringified) so the agent loop sees the tweak structurally and can re-propose. On timeout it returns a soft message telling the agent to ask the user before retrying.
+
+Three judgement calls:
+
+**No-op short-circuit.** If `before === args.newBody`, return immediately without bothering the user with a no-change diff. The agent occasionally re-proposes verbatim during multi-turn flows; this keeps the modal honest.
+
+**Tweak return shape is structured, not prose.** Returning `{"decision":"tweak","tweakText":"…"}` (rather than just the prose) lets the agent disambiguate "user asked for an adjustment" from "user added free-form chat context." The agent reads the JSON, integrates the guidance, and calls `propose_note_edit` again with a tightened body — the loop stays explicit.
+
+**Modal widens to `max-w-3xl` when `kind === "note_edit"`.** The default `max-w-lg` is fine for JSON dumps but cramped for a side-by-side markdown diff. Conditional based on payload kind so future tools (`node_merge` next) can pick their own width without coupling. Both before/after blocks render through `react-markdown` + `remark-gfm` with a local `NOTE_DIFF_PROSE` palette mirroring the panel editor's prose styling — empty `before` shows a `(empty)` placeholder for the rare case where a node's note was deleted between the agent's read and its proposal.
+
+System prompt gained an `EDITING NODE NOTES` section: complete-body-not-diff, read first via `mcp__kg__get_node_note` if unsure what to preserve, keep the `reason` specific (one short sentence), don't loop forever on tweak, don't propose blind for nodes without an existing note. The latter is intentional out-of-scope: agent-creating a note from scratch is the manual editor's role; the propose-edit gate is for *changing* something the user already curated.
+
+Phase 2 closed: approval modal infra (`m5p2-approval-modal`) + first consumer (`m5p2-propose-note-edit`) both shipped. Phase 3 (`m5p3-propose-node-merge`) is next; it'll add a second `kind` to the modal's payload dispatch.
+
+### 2026-05-03 · M5 — node-attached notes layer
+
+M5 layers free-form markdown notes onto existing KG nodes alongside the structured edges. Notes carry the long-form context that doesn't fit edge form (a person's anecdote, a project's evolving readme, a topic's nuances) without abandoning the graph as the organizing spine.
+
+**Schema: 1:1 with nodes.** New `node_notes(node_id INTEGER PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE, body TEXT NOT NULL, updated_at TEXT NOT NULL)` table. One body per node — no orphan notes, no multi-note-per-node. `forget` cascades automatically. Notes don't get their own embeddings; they ride along when the parent node is retrieved.
+
+**Two write paths.** The user authors directly via a markdown editor inside the existing graph-modal node detail panel. The agent writes via `propose_note_edit(node_id, new_body)` — gated on user approval (see below). Asymmetry is intentional: facts land immediately (`record_user_fact`), but a paragraph rewrite is much harder to undo than a single edge `forget`, so notes warrant the gate.
+
+**Browsing surface.** A top-level "Notes" panel in the empty-state dashboard lists every node with a non-empty note (name + type + ~200-char preview). Click → opens the node detail panel. The graph modal keeps its existing role; the notes panel adds a flat reading view that doesn't require knowing which node a thought is attached to.
+
+**Retrieval: on-demand.** When `retrieveSubgraph` surfaces a node, it includes a `notePreview` field (first ~200 chars) in the formatted context block. Full body comes via a new `mcp__kg__get_node_note(id)` tool — opt-in so the agent only pulls bodies it actually needs, keeping the context block tight.
+
+**Approval modal as reusable infra.** Agent tools that mutate notes or merge nodes don't apply changes immediately; they emit an `approval_request` SSE event with `{requestId, kind, payload}` and block until the user responds via `POST /api/approval/:requestId`. The web client renders a modal with three options — **Approve** / **Deny** / **Tweak**. "Tweak" opens a textarea for free-form prose; the prose feeds back to the agent loop as the tool's return value (so the chain-of-thought continues from there). Pattern is reusable: future agent-proposes-X tools plug into the same SSE event + endpoint.
+
+**Agent tools.**
+
+- `propose_note_edit(node_id, new_body, reason)` — rewrites a note. User sees a diff before it lands.
+- `propose_node_merge(source_ids[], target: {name, type, body})` — collapses N nodes into 1. Most ambitious: edges combine (dedup by `(otherEndId, edgeType)`), body unifies, embeddings regenerate, provenance rewrites to target, source nodes drop. One transaction.
+
+**"Organize" = merge nodes, not merge notes.** With 1:1 schema there's nothing to organize at the note level. Organization happens at the node level: collapse `Person:John` + `Person:John_Doe` into one, unify their note bodies in the merge proposal. Cleaner mental model than parallel concepts of "merge nodes" and "merge notes."
+
+**Phased rollout (six stories, three phases).**
+
+- **Phase 1 — manual notes baseline:** `m5p1-notes-schema-editor` (table + node-detail editor), `m5p1-notes-panel` (dashboard browsing view), `m5p1-notes-retrieval` (snippet in retrieved-node payload + `get_node_note` tool).
+- **Phase 2 — approval modal + first agent tool:** `m5p2-approval-modal` (SSE + response endpoint + UI), `m5p2-propose-note-edit` (first consumer).
+- **Phase 3 — node merge:** `m5p3-propose-node-merge` (most complex tool; lands on its own).
+
+**Out of scope.** Standalone notes (no parent node), 1:N notes per node, agent-side embeddings for note bodies (retrieval rides on the parent node's embedding), versioning/history of notes (drop-and-replace; agent's `reason` lives in chat history), markdown rendering inside chat bubbles (already shipped in M4 phase 1).
+
 ### 2026-05-03 · Obsidian markdown import — runtime agent flow, not structured importer
 
 `m4p3-obsidian-import` ships as a **system-prompt extension** for the home-ai chat agent rather than a structured parser. Markdown is too varied across users (vault conventions, tag dialects, frontmatter discipline) to reliably extract facts via regex; the model has to do the judgement work. So the implementation is a runtime flow — when a user asks for an Obsidian import or types `/import-obsidian <path>` in chat, the home-ai agent walks the vault using its existing `Read` + `Glob` tools and records facts via `mcp__kg__record_user_fact`.

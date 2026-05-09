@@ -74,9 +74,13 @@ Split into three phases; each ships independently.
 - [x] Seed expanded to 17 nodes / 20 edges (project + tech stack + service providers + topic space) so the graph isn't a single dot.
 - [x] Smoke tests: graph opens with FA2 settling, hover highlights, click opens detail panel, filter chips hide/show types, live-refreshes on chat completion.
 
-### Phase 3 — bulk import (deferred)
+### Phase 3 — bulk import (shipped ✓)
 
-Stories tracked in `tasks/planned/` (`m4p3-*`).
+- [x] JSON KG import endpoint (`POST /api/kg/import`): accepts the export shape, inserts nodes/edges under a new `bulk_import` provenance source, default skip-merge on `(name, type)` collision, opt-in replace-all wipes first. Single transaction with fresh IDs and edges rewired via id-map; background re-embed of inserted nodes.
+- [x] Dashboard "Import" section: file picker + replace-all checkbox + browser `confirm()` gate. Round-trips the JSON export — useful for backup restore and cross-machine migration.
+- [x] Obsidian-vault ingestion via system-prompt flow: chat agent walks a vault with `Read`+`Glob`, calls `mcp__kg__record_user_fact`, uses `mcp__kg__neighbors` to dedupe before insert. Triggered by `/import-obsidian <path>` or free-form request. Companion `.claude/commands/import-obsidian.md` reference card.
+
+Smoke tests: JSON round-trip (default-merge skips known nodes, replace-all reseeds the snapshot, transactional rollback on partial failure). Obsidian flow is manual — exercise via chat with a real vault path.
 
 ## M4.5 — production deployment + auth (shipped ✓)
 
@@ -93,6 +97,50 @@ Stories tracked in `tasks/planned/` (`m4p3-*`).
 
 Smoke test: `docker compose up` on a clean machine, set env, hit URL, log in, send a chat, kill container, recreate, KG and sessions persist.
 
-## M5 — notes layer (planned, design pending)
+## M5 — node-attached notes layer
 
-Layered knowledge base: facts (today's KG, structured) + notes (free-form markdown) + cross-layer links. Recording-rules and UX still being designed; see the in-progress design entry once it lands.
+Free-form markdown notes attached 1:1 to KG nodes. Long-form context that doesn't fit edge form, with on-demand retrieval, agent-write tooling gated by an approval modal, and a browsing surface. Design landed 2026-05-03 in `docs/design.md`.
+
+Phased like M4 — three phases, six stories tracked in `tasks/planned/`.
+
+### Phase 1 — manual notes baseline (shipped ✓)
+
+- [x] `m5p1-notes-schema-editor` — `node_notes` table + GET/PUT API + markdown editor inside the existing node detail panel.
+- [x] `m5p1-notes-panel` — top-level "Notes" surface in the empty-state dashboard (flat list of nodes with notes; click → opens detail panel).
+- [x] `m5p1-notes-retrieval` — `notePreview` snippet alongside retrieved nodes + `mcp__kg__get_node_note` tool for full body.
+
+### Phase 2 — approval modal + agent edits (shipped ✓)
+
+- [x] `m5p2-approval-modal` — SSE `approval_request` event + response endpoint + reusable Approve/Deny/Tweak modal infrastructure.
+- [x] `m5p2-propose-note-edit` — first consumer: agent rewrites notes through the modal (before/after diff render, applies on approve, returns `tweakText` to the agent loop on tweak).
+
+### Phase 3 — node merge (shipped ✓)
+
+- [x] `m5p3-propose-node-merge` — collapse N duplicate nodes into 1 (edges deduped, body unified, embeddings regenerated, provenance rewritten, source nodes dropped) in one transaction. Most complex tool; lands on its own.
+
+## M6 — Knowledge sidebar (shipped ✓)
+
+A layout + organization pass on top of M5. The left sidebar reorganizes into `Agents` (chats) and `Knowledge` (Notes / Knowledge Graph) sections; notes get a folder-tree-organized browse surface (VSCode explorer ergonomics) with notes parented in user-defined folders; the underlying KG nodes-and-edges substrate stays untouched (folders are pure UI). Graph view demotes from header-modal to inline main-panel view; the right-side memory panel demotes from always-visible to contextual chat-only. Notes get their own `name` independent of the underlying node, and a new `Generic` entity type lands as the default for inline-created notes. Design landed 2026-05-03 in `docs/design.md`.
+
+Phased — four phases, tasks tracked in `tasks/planned/`.
+
+### Phase 1 — layout reshuffle (shipped ✓)
+
+- [x] `m6p1-sidebar-sections` — restructure left sidebar with `Agents` + `Knowledge` collapsible sections; chats move under Agents; Notes / Knowledge Graph buttons under Knowledge; header `Network` icon retires.
+- [x] `m6p1-memory-contextual` — demote memory panel to chat-only with slide-in + resizable drag handle + collapsible close button; persist collapsed state across sessions.
+
+### Phase 2 — notes view + secondary sidebar (shipped ✓)
+
+- [x] `m6p2-notes-view-shell` — secondary sidebar slides out when Notes is selected (flat list, no hierarchy yet); main-panel modes for preview-only + split editor/preview; `Edit` button toggles between them.
+- [x] `m6p2-note-name-field` — add `name TEXT NOT NULL` column to `node_notes`; backfill existing rows with the node's name; surface the note's own name in tree / preview header / dashboard widget; rename decoupled from node-rename.
+- [x] `m6p2-note-creation-flow` — VSCode-style inline note creation with `untitled` placeholder; new `Generic` entity type added to the taxonomy as the default for inline-created notes.
+
+### Phase 3 — folder data model + CRUD (shipped ✓)
+
+- [x] `m6p3-folder-schema` — `note_folders(id, name, parent_id NULL, sort_order)` table; `folder_id NULL FK` on `node_notes`; tree state persistence.
+- [x] `m6p3-folder-crud` — context-sensitive right-click menu (Add subfolder / Add note / Rename / Delete on folders; Rename / Delete on notes; Add folder / Add note on empty space); inline rename via right-click; non-empty-delete prompt with move-to-unfiled default.
+- [x] `m6p3-folder-dragdrop` — drag-and-drop notes between folders, folders into folders, drop to root for unfiled.
+
+### Phase 4 — graph view as main panel (shipped ✓)
+
+- [x] `m6p4-graph-inline` — move graph from header-modal to inline main-panel view; bigger detail panel by default; note section is preview-only with an `Edit` button that navigates to the Notes view, expands the tree, and opens the note in split-edit mode.

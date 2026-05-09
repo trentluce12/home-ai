@@ -5,6 +5,7 @@ import {
   EDGE_TYPES,
   NODE_TYPES,
   type KgNode,
+  type KgNoteListEntry,
   type KgStats,
   type NodeWithNeighbors,
   type RecentEdge,
@@ -13,17 +14,54 @@ import {
 interface Props {
   refreshKey: number;
   onChange: () => void;
+  onOpenNode: (nodeId: string) => void;
+  /**
+   * `agents` — default; full kitchen-sink KG widget set (stats, recent,
+   * notes, add-fact, forget, export, import). Shown when the user is on
+   * the chat dashboard with no chat selected.
+   *
+   * `notes` — Notes section is active in the secondary sidebar but no
+   * specific note is selected. Recent-notes panel is moved to the top and
+   * emphasized; the heavy agents-context KG widgets (add-fact, forget,
+   * import) are hidden so the surface stays focused on browsing notes.
+   */
+  variant?: "agents" | "notes";
 }
 
-export function EmptyDashboard({ refreshKey, onChange }: Props) {
+export function EmptyDashboard({
+  refreshKey,
+  onChange,
+  onOpenNode,
+  variant = "agents",
+}: Props) {
+  if (variant === "notes") {
+    return (
+      <div className="mx-auto flex w-full max-w-xl flex-col gap-10 animate-fade-in">
+        <NotesHero />
+        <NotesPanel refreshKey={refreshKey} onOpenNode={onOpenNode} />
+        <StatsAndRecent refreshKey={refreshKey} />
+        <ExportRow />
+      </div>
+    );
+  }
   return (
     <div className="mx-auto flex w-full max-w-xl flex-col gap-10 animate-fade-in">
       <Hero />
       <StatsAndRecent refreshKey={refreshKey} />
+      <NotesPanel refreshKey={refreshKey} onOpenNode={onOpenNode} />
       <AddFactForm onChange={onChange} />
       <ForgetForm onChange={onChange} />
       <ExportRow />
       <ImportRow onChange={onChange} />
+    </div>
+  );
+}
+
+function NotesHero() {
+  return (
+    <div className="text-center">
+      <p className="text-3xl font-medium tracking-tight text-zinc-200">notes.</p>
+      <p className="mt-2 text-sm text-zinc-500">pick one from the sidebar.</p>
     </div>
   );
 }
@@ -145,6 +183,82 @@ function StatsAndRecent({ refreshKey }: { refreshKey: number }) {
             ))}
           </ul>
         </div>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Recent-notes widget on the dashboard. Each row's primary label is the
+ * note's own `name` (M6 phase 2 — sourced from `node_notes.name`, decoupled
+ * from the underlying node's name). `n.type` continues to mirror the
+ * underlying node's type since notes don't have their own type.
+ */
+function NotesPanel({
+  refreshKey,
+  onOpenNode,
+}: {
+  refreshKey: number;
+  onOpenNode: (nodeId: string) => void;
+}) {
+  const [notes, setNotes] = useState<KgNoteListEntry[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setError(null);
+    api
+      .notes()
+      .then((res) => {
+        if (!cancelled) setNotes(res);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshKey]);
+
+  if (error) {
+    return (
+      <section>
+        <SectionLabel>notes</SectionLabel>
+        <p className="text-sm text-red-400">{error}</p>
+      </section>
+    );
+  }
+  if (!notes) return null;
+
+  return (
+    <section>
+      <SectionLabel>notes</SectionLabel>
+      {notes.length === 0 ? (
+        <p className="rounded-lg border border-zinc-900 bg-zinc-900/30 px-4 py-3 text-sm text-zinc-500">
+          No notes yet — open a node in the graph and add one.
+        </p>
+      ) : (
+        <ul className="flex flex-col gap-1.5">
+          {notes.map((n) => (
+            <li key={n.nodeId}>
+              <button
+                onClick={() => onOpenNode(n.nodeId)}
+                className="flex w-full flex-col gap-1 rounded-md border border-zinc-900 bg-zinc-900/30 px-3 py-2 text-left transition hover:border-zinc-700 hover:bg-zinc-900/60"
+              >
+                <div className="flex items-baseline justify-between gap-2">
+                  <div className="min-w-0 truncate">
+                    <span className="text-sm text-zinc-200">{n.name}</span>
+                    <span className="ml-2 text-xs text-zinc-500">{n.type}</span>
+                  </div>
+                  <span className="font-mono text-[10px] text-zinc-600">
+                    {timeAgo(Date.parse(n.updatedAt))}
+                  </span>
+                </div>
+                <p className="line-clamp-2 text-xs text-zinc-500">{n.preview}</p>
+              </button>
+            </li>
+          ))}
+        </ul>
       )}
     </section>
   );
